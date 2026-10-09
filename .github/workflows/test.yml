@@ -8,12 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: 1.95.0
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Lint + test (desktop / server)
-  # ---------------------------------------------------------------------------
   lint-and-test:
     name: Lint & test
     runs-on: ubuntu-latest
@@ -21,20 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      # Installs the toolchain from rust-toolchain.toml and caches ~/.cargo
+      # and target/ (Swatinem/rust-cache). No RUSTFLAGS: clippy checks lints.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
-
-      - name: Cache dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          rustflags: ""
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -42,83 +29,15 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Debug profile: the release profile's fat LTO only slows tests down.
+      # One thread: config tests mutate global env vars.
       - name: Run tests
-        # --test-threads=1 because a few config tests mutate global env vars and
-        # race each other in parallel runs.
-        # Extractor tests are excluded here — they hit real upstream hosts
-        # (Cloudflare / Turnstile-protected) and are run locally only.
-        run: |
-          cargo test --release --lib --bins -- --test-threads=1
-          cargo test --release --test auth_tests --test config_tests -- --test-threads=1
+        run: cargo test -- --test-threads=1
 
       - name: Install cargo-machete
-        run: cargo install cargo-machete --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
 
       - name: Audit unused dependencies
         run: cargo machete
-
-  # ---------------------------------------------------------------------------
-  # Android cross-compile smoke test (arm64 only — covers 95%+ of devices)
-  # ---------------------------------------------------------------------------
-  android-smoke:
-    name: Android · arm64-v8a smoke build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-linux-android
-
-      - name: Set up Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26d
-
-      - name: Build
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: |
-          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android21-clang"
-          export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android21-clang"
-          export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
-          export RANLIB_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ranlib"
-          # tls-rustls instead of tls-native/vendored-openssl: avoids linker
-          # conflicts between OpenSSL and BoringSSL (rquest's boring-sys2).
-          cargo build \
-            --release \
-            --target aarch64-linux-android \
-            --no-default-features \
-            --features "hls,mpd,drm,xtream,extractors,telegram,acestream,web-ui,base64-url,tls-rustls"
-
-  # ---------------------------------------------------------------------------
-  # iOS cross-compile smoke test (device arch only)
-  # ---------------------------------------------------------------------------
-  ios-smoke:
-    name: iOS · aarch64 smoke build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-ios
-
-      - name: Build (device)
-        # IPHONEOS_DEPLOYMENT_TARGET=13.0 is required so boring-sys &
-        # zstd-sys can resolve modern system intrinsics (e.g. ___chkstk_darwin)
-        # that don't exist on older iOS targets.
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "13.0"
-        run: |
-          cargo build \
-            --release \
-            --target aarch64-apple-ios \
-            --no-default-features \
-            --features "ffi,hls,mpd,drm,xtream,extractors,web-ui,base64-url,acestream,tls-rustls"

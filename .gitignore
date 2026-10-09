@@ -24,3 +24,5 @@ config.toml
 
 # MkDocs build output
 site/
+# Prebuilt binary for `docker build --target prebuilt`
+dist/

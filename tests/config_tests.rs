@@ -1,6 +1,6 @@
-use mediaflow_proxy_light::config::Config;
 use std::sync::{Mutex, MutexGuard};
 use std::{env, fs};
+use tv_mediaproxy::config::Config;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -12,7 +12,6 @@ fn setup() -> MutexGuard<'static, ()> {
     env::remove_var("APP__SERVER__PORT");
     env::remove_var("APP__SERVER__PATH");
     env::remove_var("APP__AUTH__API_PASSWORD");
-    env::remove_var("APP__PROXY__BUFFER_SIZE");
     env::remove_var("APP__PROXY__TRANSPORT_ROUTES");
     env::remove_var("CONFIG_PATH");
     guard
@@ -27,7 +26,6 @@ fn test_config_from_env() {
     env::set_var("APP__SERVER__PORT", "8888"); // Match the default port in Config
     env::set_var("APP__SERVER__PATH", "/mediaflow/prefix");
     env::set_var("APP__AUTH__API_PASSWORD", "test_password");
-    env::set_var("APP__PROXY__BUFFER_SIZE", "16384");
 
     let config = Config::from_env().unwrap();
 
@@ -36,7 +34,6 @@ fn test_config_from_env() {
     assert_eq!(config.server.port, 8888); // Updated to match default port
     assert_eq!(config.server.path, "/mediaflow/prefix");
     assert_eq!(config.auth.api_password, "test_password");
-    assert_eq!(config.proxy.buffer_size, 16384);
 }
 
 #[test]
@@ -91,7 +88,6 @@ port = 8888
 api_password = "test_password"
 
 [proxy]
-buffer_size = 16384
 
 [proxy.transport_routes."all://*.streaming.com"]
 proxy = true

@@ -27,10 +27,6 @@ impl Mp4Atom {
         out.extend_from_slice(&self.data);
         out
     }
-
-    pub fn atom_type_str(&self) -> &str {
-        std::str::from_utf8(&self.atom_type).unwrap_or("????")
-    }
 }
 
 // ---------------------------------------------------------------------------

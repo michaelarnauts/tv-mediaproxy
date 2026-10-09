@@ -61,6 +61,16 @@ impl EncScheme {
     }
 }
 
+/// Boxes in a `traf` that only describe encryption: sample auxiliary info and
+/// the `seig` sample group. They are removed along with the encryption.
+fn is_traf_encryption_box(atom: &Mp4Atom) -> bool {
+    match &atom.atom_type {
+        b"senc" | b"saiz" | b"saio" => true,
+        b"sbgp" | b"sgpd" => atom.data.get(4..8) == Some(b"seig".as_slice()),
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MP4Decrypter
 // ---------------------------------------------------------------------------
@@ -115,26 +125,29 @@ impl Mp4Decrypter {
     // Public entry points
     // -----------------------------------------------------------------------
 
-    /// Decrypt a combined init+segment buffer.
-    pub fn decrypt_segment(&mut self, combined: &[u8], include_init: bool) -> Vec<u8> {
-        let mut parser = Mp4Parser::new(combined.to_vec());
-        let atoms = parser.list_atoms();
+    /// Decrypt a media segment. The init segment supplies the track and
+    /// encryption parameters; its boxes are only emitted with `include_init`.
+    pub fn decrypt_segment(&mut self, init: &[u8], segment: &[u8], include_init: bool) -> Vec<u8> {
+        let init_atoms = Mp4Parser::new(init.to_vec()).list_atoms();
+        let segment_atoms = Mp4Parser::new(segment.to_vec()).list_atoms();
+        let all = || init_atoms.iter().chain(segment_atoms.iter());
 
         // Process in canonical order
         let mut processed: HashMap<[u8; 4], Mp4Atom> = HashMap::new();
         for type_tag in [*b"moov", *b"moof", *b"sidx", *b"mdat"] {
-            if let Some(atom) = atoms.iter().find(|a| a.atom_type == type_tag) {
+            if let Some(atom) = all().find(|a| a.atom_type == type_tag) {
                 let result = self.process_atom(atom);
                 processed.insert(type_tag, result);
             }
         }
 
-        let init_types: [&[u8; 4]; 2] = [b"ftyp", b"moov"];
+        let emitted: Vec<&Mp4Atom> = if include_init {
+            all().collect()
+        } else {
+            segment_atoms.iter().collect()
+        };
         let mut out = Vec::new();
-        for atom in &atoms {
-            if !include_init && init_types.contains(&&atom.atom_type) {
-                continue;
-            }
+        for atom in emitted {
             if let Some(p) = processed.get(&atom.atom_type) {
                 out.extend_from_slice(&p.pack());
             } else {
@@ -409,26 +422,30 @@ impl Mp4Decrypter {
         let children = Mp4Parser::children_of(&moof.data);
         self.track_infos.clear();
 
-        // First pass: calculate total encryption overhead
+        // First pass: calculate total encryption overhead — every byte removed
+        // from the moof shifts the sample data offsets.
         self.total_encryption_overhead = 0;
         for child in &children {
             if child.atom_type == *b"traf" {
                 let traf_children = Mp4Parser::children_of(&child.data);
                 let overhead: usize = traf_children
                     .iter()
-                    .filter(|a| matches!(&a.atom_type, b"senc" | b"saiz" | b"saio"))
+                    .filter(|a| is_traf_encryption_box(a))
                     .map(|a| a.data.len() + 8)
                     .sum();
                 self.total_encryption_overhead += overhead;
+            } else if child.atom_type == *b"pssh" {
+                self.total_encryption_overhead += child.data.len() + 8;
             }
         }
 
-        // Second pass: process atoms
+        // Second pass: process atoms. A pssh left in a moof makes a browser
+        // treat the stream as encrypted.
         let mut new_data = Vec::new();
         for child in &children {
             if child.atom_type == *b"traf" {
                 new_data.extend_from_slice(&self.process_traf(child).pack());
-            } else {
+            } else if child.atom_type != *b"pssh" {
                 new_data.extend_from_slice(&child.pack());
             }
         }
@@ -468,7 +485,7 @@ impl Mp4Decrypter {
                     sample_info = self.parse_senc(child, sample_count);
                     // senc is NOT written to new_data (stripped)
                 }
-                b"saiz" | b"saio" => { /* stripped */ }
+                _ if is_traf_encryption_box(child) => { /* stripped */ }
                 _ => new_data.extend_from_slice(&child.pack()),
             }
         }
@@ -802,39 +819,6 @@ impl Mp4Decrypter {
     }
 
     // -----------------------------------------------------------------------
-    // Streaming helpers (public)
-    // -----------------------------------------------------------------------
-
-    /// Prime the decrypter from an init segment (moov box) without emitting bytes.
-    /// Call this once before streaming moof/mdat pairs through `process_moof_atom`
-    /// and `decrypt_mdat_atom`.
-    pub fn init_from_segment(&mut self, init_bytes: &[u8]) {
-        let mut parser = Mp4Parser::new(init_bytes.to_vec());
-        for atom in parser.list_atoms() {
-            if atom.atom_type == *b"moov" {
-                self.process_moov(&atom); // side-effects only; return value discarded
-            }
-        }
-    }
-
-    /// Process a moof atom: strip senc/saiz/saio, populate per-sample info for
-    /// the next `decrypt_mdat_atom` call.  Returns the cleaned moof atom.
-    pub fn process_moof_atom(&mut self, atom: &Mp4Atom) -> Mp4Atom {
-        self.process_moof(atom)
-    }
-
-    /// Decrypt a mdat atom using per-sample info gathered from the last
-    /// `process_moof_atom` call.
-    pub fn decrypt_mdat_atom(&mut self, atom: &Mp4Atom) -> Mp4Atom {
-        self.decrypt_mdat(atom)
-    }
-
-    /// Adjust byte offsets in a sidx atom.
-    pub fn process_sidx_atom(&self, atom: &Mp4Atom) -> Mp4Atom {
-        self.process_sidx(atom)
-    }
-
-    // -----------------------------------------------------------------------
     // Key lookup
     // -----------------------------------------------------------------------
 
@@ -911,11 +895,10 @@ fn decrypt_sample(
     }
 }
 
-/// AES-CTR (cenc / cens).
+/// AES-CTR (cenc / cens). The keystream runs on across the protected ranges
+/// of a sample byte for byte: a range that ends mid-block is continued by the
+/// next one, so the ranges are decrypted as one stream.
 fn decrypt_sample_cenc(sample: &[u8], info: &SampleInfo, key: &[u8]) -> Vec<u8> {
-    type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-    type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
-
     let mut iv = [0u8; 16];
     let copy_len = info.iv.len().min(16);
     iv[..copy_len].copy_from_slice(&info.iv[..copy_len]);
@@ -924,70 +907,43 @@ fn decrypt_sample_cenc(sample: &[u8], info: &SampleInfo, key: &[u8]) -> Vec<u8> 
         return aes_ctr_decrypt(key, &iv, sample);
     }
 
-    let mut result = Vec::with_capacity(sample.len());
+    let mut ranges = Vec::with_capacity(info.sub_samples.len());
     let mut pos = 0usize;
-    // Create a fresh cipher for each sub-sample group (IV does not reset between subsamples)
-    let mut offset_blocks = 0u128;
-
     for &(clear, enc) in &info.sub_samples {
-        // Copy clear bytes
-        let end = (pos + clear as usize).min(sample.len());
-        result.extend_from_slice(&sample[pos..end]);
-        pos += clear as usize;
-
-        // Decrypt encrypted bytes
-        let enc_end = (pos + enc as usize).min(sample.len());
-        let enc_data = &sample[pos..enc_end];
-
-        // AES-CTR: the block counter increments by 1 per 16-byte block
-        // We need to continue from where we left off
-        let decrypted = aes_ctr_decrypt_with_offset(key, &iv, enc_data, offset_blocks);
-        offset_blocks += (enc as u128).div_ceil(16);
-        result.extend_from_slice(&decrypted);
-        pos += enc as usize;
+        let start = (pos + clear as usize).min(sample.len());
+        let end = (start + enc as usize).min(sample.len());
+        ranges.push(start..end);
+        pos = end;
     }
 
-    // Remaining data
-    if pos < sample.len() {
-        let enc_data = &sample[pos..];
-        let decrypted = aes_ctr_decrypt_with_offset(key, &iv, enc_data, offset_blocks);
-        result.extend_from_slice(&decrypted);
+    let protected: Vec<u8> = ranges
+        .iter()
+        .flat_map(|r| sample[r.clone()].iter().copied())
+        .collect();
+    let mut plain = aes_ctr_decrypt(key, &iv, &protected).into_iter();
+    let mut result = sample.to_vec();
+    for range in ranges {
+        for (byte, p) in result[range].iter_mut().zip(&mut plain) {
+            *byte = p;
+        }
     }
-
     result
 }
 
 fn aes_ctr_decrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    aes_ctr_decrypt_with_offset(key, iv, data, 0)
-}
-
-fn aes_ctr_decrypt_with_offset(
-    key: &[u8],
-    iv: &[u8; 16],
-    data: &[u8],
-    block_offset: u128,
-) -> Vec<u8> {
     use aes::cipher::{KeyIvInit, StreamCipher};
-
-    // Adjust IV by adding block_offset to the counter portion (last 8 bytes in big-endian)
-    let mut iv_with_offset = *iv;
-    if block_offset > 0 {
-        let counter = u64::from_be_bytes(iv_with_offset[8..].try_into().unwrap_or([0; 8]));
-        let new_counter = counter.wrapping_add(block_offset as u64);
-        iv_with_offset[8..].copy_from_slice(&new_counter.to_be_bytes());
-    }
 
     let mut buf = data.to_vec();
     match key.len() {
         16 => {
             type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-            if let Ok(mut cipher) = Aes128Ctr::new_from_slices(key, &iv_with_offset) {
+            if let Ok(mut cipher) = Aes128Ctr::new_from_slices(key, iv) {
                 cipher.apply_keystream(&mut buf);
             }
         }
         32 => {
             type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
-            if let Ok(mut cipher) = Aes256Ctr::new_from_slices(key, &iv_with_offset) {
+            if let Ok(mut cipher) = Aes256Ctr::new_from_slices(key, iv) {
                 cipher.apply_keystream(&mut buf);
             }
         }
@@ -1178,212 +1134,104 @@ fn aes_cbc_decrypt_full_blocks(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8
 }
 
 // ---------------------------------------------------------------------------
-// Streaming CENC decryption
-// ---------------------------------------------------------------------------
-
-/// Stream-decrypt a CENC-protected SegmentBase media file.
-///
-/// `init_bytes`     – The init segment (moov box, bytes 0..init_range_end).
-/// `segment_stream` – Streaming bytes from the CDN (bytes init_range_end+1 to end).
-/// `key_id` / `key` – Possibly comma-separated hex strings for multi-key DRM.
-///
-/// Returns a `Stream` that yields decrypted fMP4 chunks as each moof+mdat pair
-/// is processed — the client (mpv/ffmpeg) can start decoding before the full
-/// file is downloaded.
-pub fn decrypt_segment_streaming<S>(
-    init_bytes: bytes::Bytes,
-    segment_stream: S,
-    key_id: String,
-    key: String,
-    // When true (no separate EXT-X-MAP), emit the processed moov/ftyp as the
-    // first chunk so the player receives a self-contained fMP4 stream.
-    include_init: bool,
-) -> impl futures::Stream<Item = Result<bytes::Bytes, crate::error::AppError>>
-where
-    S: futures::Stream<Item = Result<bytes::Bytes, crate::error::AppError>>,
-{
-    use crate::error::AppError;
-    use futures::StreamExt;
-
-    let key_map = crate::drm::clearkey::build_key_map_from_hex(&key_id, &key);
-
-    async_stream::stream! {
-        if key_map.is_empty() {
-            yield Err(AppError::Drm("No valid key/key_id pairs provided for streaming".to_string()));
-            return;
-        }
-
-        let mut decrypter = Mp4Decrypter::new(key_map);
-
-        if include_init {
-            // process_init_only both primes the decrypter state AND strips the
-            // encryption boxes from moov.  Emit the cleaned init bytes first so
-            // the player has context before any moof/mdat arrives.
-            let cleaned_init = decrypter.process_init_only(&init_bytes);
-            yield Ok(bytes::Bytes::from(cleaned_init));
-        } else {
-            // Init sent separately (EXT-X-MAP) — only prime the decrypter state.
-            decrypter.init_from_segment(&init_bytes);
-        }
-
-        // Rolling byte buffer for partial box data.
-        let mut buf: Vec<u8> = Vec::new();
-
-        // Current box we are accumulating.
-        let mut cur_type: Option<[u8; 4]> = None;
-        let mut cur_body: Vec<u8> = Vec::new();
-        let mut cur_body_remaining: usize = 0;
-
-        let mut stream = std::pin::pin!(segment_stream);
-
-        'outer: loop {
-            // ----------------------------------------------------------------
-            // Process as many complete boxes as possible from `buf`.
-            // ----------------------------------------------------------------
-            loop {
-                if cur_type.is_none() {
-                    // Need at least 8 bytes to read the standard box header.
-                    if buf.len() < 8 {
-                        break;
-                    }
-                    let size_u32 = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    let btype: [u8; 4] = [buf[4], buf[5], buf[6], buf[7]];
-
-                    let (header_len, body_len) = if size_u32 == 1 {
-                        // 64-bit extended size in the next 8 bytes.
-                        if buf.len() < 16 {
-                            break; // wait for more data
-                        }
-                        let ext = u64::from_be_bytes(
-                            buf[8..16].try_into().unwrap_or([0; 8]),
-                        ) as usize;
-                        (16usize, ext.saturating_sub(16))
-                    } else if size_u32 == 0 {
-                        // Box extends to the end of the stream.
-                        // Pass through the header and let the rest fall
-                        // through unchanged at the end of the outer loop.
-                        let hdr = buf[..8].to_vec();
-                        buf.drain(..8);
-                        yield Ok(bytes::Bytes::from(hdr));
-                        // Drain any already-buffered bytes.
-                        if !buf.is_empty() {
-                            yield Ok(bytes::Bytes::from(std::mem::take(&mut buf)));
-                        }
-                        // Forward the rest of the stream unmodified.
-                        while let Some(chunk) = stream.next().await {
-                            match chunk {
-                                Ok(c) => yield Ok(c),
-                                Err(e) => { yield Err(e); return; }
-                            }
-                        }
-                        return;
-                    } else {
-                        (8usize, (size_u32 as usize).saturating_sub(8))
-                    };
-
-                    buf.drain(..header_len);
-                    cur_type = Some(btype);
-                    cur_body_remaining = body_len;
-                    cur_body.clear();
-                    // Pre-reserve so realloc pressure is low for small boxes.
-                    cur_body.reserve(body_len.min(256 * 1024));
-                }
-
-                // Accumulate body bytes from the buffer.
-                let take = buf.len().min(cur_body_remaining);
-                if take > 0 {
-                    cur_body.extend_from_slice(&buf[..take]);
-                    buf.drain(..take);
-                    cur_body_remaining -= take;
-                }
-
-                if cur_body_remaining > 0 {
-                    break; // need more incoming data
-                }
-
-                // ----------------------------------------------------------------
-                // Box is complete.  Process it.
-                // ----------------------------------------------------------------
-                let btype = cur_type.take().unwrap();
-                let atom = Mp4Atom::new(btype, std::mem::take(&mut cur_body));
-
-                // Drop sidx: its byte-offset references point to the original
-                // encrypted stream and become incorrect after senc/saiz/saio
-                // stripping. Omitting it lets the demuxer fall back to scanning
-                // moof boxes sequentially, which is always correct.
-                if &btype == b"sidx" {
-                    continue;
-                }
-
-                let output = match &btype {
-                    b"moof" => decrypter.process_moof_atom(&atom),
-                    b"mdat" => decrypter.decrypt_mdat_atom(&atom),
-                    _ => atom, // styp, free, etc. — pass through unchanged
-                };
-
-                yield Ok(bytes::Bytes::from(output.pack()));
-            }
-
-            // ----------------------------------------------------------------
-            // Read the next chunk from the upstream CDN.
-            // ----------------------------------------------------------------
-            match stream.next().await {
-                Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
-                Some(Err(e)) => {
-                    yield Err(e);
-                    return;
-                }
-                None => {
-                    // Stream finished.  If a box was still partially buffered,
-                    // log a warning (the content is probably corrupt/truncated).
-                    if cur_type.is_some() || cur_body_remaining > 0 {
-                        tracing::warn!(
-                            "CENC stream ended with partial box: {} bytes buffered, {} body remaining",
-                            buf.len(), cur_body_remaining,
-                        );
-                    }
-                    break 'outer;
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Public entry points (mirrors Python module-level functions)
 // ---------------------------------------------------------------------------
 
-/// Decrypt a CENC-protected segment.
-///
-/// `key_id` and `key` may be comma-separated hex strings for multi-key DRM.
+/// Decrypt a media segment. `keys` is `kid:key[,kid:key]` in hex.
 pub fn decrypt_segment(
     init_segment: &[u8],
     segment_content: &[u8],
-    key_id: &str,
-    key: &str,
+    keys: &str,
     include_init: bool,
 ) -> Result<Vec<u8>, String> {
-    let key_map = crate::drm::clearkey::build_key_map_from_hex(key_id, key);
-    if key_map.is_empty() {
-        return Err("No valid key/key_id pairs provided".to_string());
-    }
-    let mut decrypter = Mp4Decrypter::new(key_map);
-    let mut combined = Vec::with_capacity(init_segment.len() + segment_content.len());
-    combined.extend_from_slice(init_segment);
-    combined.extend_from_slice(segment_content);
-    Ok(decrypter.decrypt_segment(&combined, include_init))
+    let mut decrypter = Mp4Decrypter::new(key_map(keys)?);
+    Ok(decrypter.decrypt_segment(init_segment, segment_content, include_init))
 }
 
-/// Strip encryption boxes from an init segment (for EXT-X-MAP use).
-pub fn process_drm_init_segment(
-    init_segment: &[u8],
-    key_id: &str,
-    key: &str,
-) -> Result<Vec<u8>, String> {
-    let key_map = crate::drm::clearkey::build_key_map_from_hex(key_id, key);
-    if key_map.is_empty() {
-        return Err("No valid key/key_id pairs provided".to_string());
-    }
-    let mut decrypter = Mp4Decrypter::new(key_map);
+/// Strip encryption boxes from an init segment. `keys` is `kid:key[,kid:key]` in hex.
+pub fn process_drm_init_segment(init_segment: &[u8], keys: &str) -> Result<Vec<u8>, String> {
+    let mut decrypter = Mp4Decrypter::new(key_map(keys)?);
     Ok(decrypter.process_init_only(init_segment))
+}
+
+fn key_map(keys: &str) -> Result<HashMap<Vec<u8>, Vec<u8>>, String> {
+    let map = crate::drm::clearkey::parse_keys(keys);
+    if map.is_empty() {
+        return Err("No valid kid:key pairs provided".to_string());
+    }
+    Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes::cipher::{KeyIvInit, StreamCipher};
+
+    #[test]
+    fn cenc_keystream_continues_across_unaligned_subsamples() {
+        let key = [7u8; 16];
+        let iv8 = [1, 2, 3, 4, 5, 6, 7, 8];
+        let plain: Vec<u8> = (0..100u8).collect();
+        let sub_samples = vec![(5u16, 20u32), (3, 41), (2, 29)];
+
+        // Encrypt: one CTR keystream over the protected bytes only.
+        let mut iv = [0u8; 16];
+        iv[..8].copy_from_slice(&iv8);
+        let mut keystream = vec![0u8; 90];
+        ctr::Ctr128BE::<aes::Aes128>::new(&key.into(), &iv.into()).apply_keystream(&mut keystream);
+        let mut ks = keystream.iter();
+        let mut cipher = plain.clone();
+        let mut pos = 0;
+        for &(clear, enc) in &sub_samples {
+            pos += clear as usize;
+            for b in &mut cipher[pos..pos + enc as usize] {
+                *b ^= ks.next().unwrap();
+            }
+            pos += enc as usize;
+        }
+
+        let info = SampleInfo {
+            is_encrypted: true,
+            iv: iv8.to_vec(),
+            sub_samples,
+        };
+        assert_eq!(decrypt_sample_cenc(&cipher, &info, &key), plain);
+    }
+
+    fn atom(t: &[u8; 4], data: Vec<u8>) -> Mp4Atom {
+        Mp4Atom::new(*t, data)
+    }
+
+    #[test]
+    fn moof_loses_pssh_and_seig_groups_and_offsets_follow() {
+        let tfhd = atom(b"tfhd", [0u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        // trun: flags = data-offset present, 0 samples, data_offset = 500
+        let trun = atom(
+            b"trun",
+            [1u32.to_be_bytes(), 0u32.to_be_bytes(), 500i32.to_be_bytes()].concat(),
+        );
+        let sgpd = atom(b"sgpd", [&[1u8, 0, 0, 0][..], b"seig", &[0; 8]].concat());
+        let roll = atom(b"sgpd", [&[1u8, 0, 0, 0][..], b"roll", &[0; 8]].concat());
+        let traf = atom(
+            b"traf",
+            [tfhd.pack(), trun.pack(), sgpd.pack(), roll.pack()].concat(),
+        );
+        let pssh = atom(b"pssh", vec![0; 24]);
+        let moof = atom(b"moof", [pssh.pack(), traf.pack()].concat());
+
+        let out = Mp4Decrypter::new(HashMap::new()).process_moof(&moof);
+
+        let children = Mp4Parser::children_of(&out.data);
+        assert_eq!(children.len(), 1, "pssh must be gone");
+        let traf_children = Mp4Parser::children_of(&children[0].data);
+        let types: Vec<_> = traf_children.iter().map(|a| a.atom_type).collect();
+        assert_eq!(
+            types,
+            vec![*b"tfhd", *b"trun", *b"sgpd"],
+            "only the seig group goes"
+        );
+        let removed = (24 + 8) + (sgpd.data.len() + 8) as i32;
+        let offset = i32::from_be_bytes(traf_children[1].data[8..12].try_into().unwrap());
+        assert_eq!(offset, 500 - removed);
+    }
 }

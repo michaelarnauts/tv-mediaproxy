@@ -63,3 +63,9 @@ init_cache_ttl     = 600  # Seconds to cache init segments (each media segment n
 [ts]
 gpac = "gpac"         # The (patched, see gpac/) gpac binary behind /ts/
 start_buffer = 12     # Seconds of already published media to start with
+
+# ---------------------------------------------------------------------------
+# HDHomeRun emulation (/hdhr/, for Plex Live TV)
+# ---------------------------------------------------------------------------
+[hdhr]
+tuners = 6  # Channels a client may play at once

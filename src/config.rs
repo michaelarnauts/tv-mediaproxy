@@ -173,6 +173,29 @@ impl Default for TsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// HDHomeRun emulation config
+// ---------------------------------------------------------------------------
+
+fn default_hdhr_tuners() -> usize {
+    6
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HdhrConfig {
+    /// Tuners announced: how many channels a client may play at once.
+    #[serde(default = "default_hdhr_tuners")]
+    pub tuners: usize,
+}
+
+impl Default for HdhrConfig {
+    fn default() -> Self {
+        Self {
+            tuners: default_hdhr_tuners(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root config
 // ---------------------------------------------------------------------------
 
@@ -185,6 +208,8 @@ pub struct Config {
     pub mpd: MpdConfig,
     #[serde(default)]
     pub ts: TsConfig,
+    #[serde(default)]
+    pub hdhr: HdhrConfig,
     /// Log filter directive (e.g. "debug", "info", "tv_mediaproxy=debug,info").
     /// Overrides the RUST_LOG env var when set.
     #[serde(default = "default_log_level")]
@@ -317,7 +342,9 @@ impl Config {
             .set_default("mpd.init_cache_ttl", 600)?
             // MPEG-TS
             .set_default("ts.gpac", "gpac")?
-            .set_default("ts.start_buffer", 12)?;
+            .set_default("ts.start_buffer", 12)?
+            // HDHomeRun
+            .set_default("hdhr.tuners", 6)?;
 
         if let Ok(config_path) = std::env::var("CONFIG_PATH") {
             let path = Path::new(&config_path);

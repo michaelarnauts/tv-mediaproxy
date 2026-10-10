@@ -36,13 +36,20 @@ says what the URL is:
 |---|---|
 | `m3u` | fetches the playlist and routes every MPD entry with `#KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey` and `license_key=<kid>:<key>[,…]` through itself as `/<password>/mpd/<kid>:<key>/<mpd url>`. Those entries lose their `inputstream.adaptive.*` KODIPROPs (the result is no longer encrypted); everything else is passed through untouched. |
 | `m3u-ts` | the same, but routes those entries to `ts`, and unprotected MPD entries too (as `/<password>/ts/<mpd url>`). |
+| `m3u-hls` | the same, routing them to `hls`. |
 | `mpd` | fetches the manifest and rewrites it, see below. Without keys only the addressing is rewritten. |
 | `seg` | fetches an init or media segment of protected content (the rewritten manifest builds these URLs). One that matches the media template in `t=` is a media segment and is decrypted; anything else is the init segment and loses its protection boxes. |
 | `ts` | plays the manifest with GPAC and streams it as MPEG-TS (`video/mp2t`), see below. The keys are optional. |
+| `hls` | turns the manifest into an HLS master playlist, see below. The keys are optional. |
+| `hdhr` | an HDHomeRun tuner for a playlist (`/<password>/hdhr/<playlist url>`), see below. |
 
 The upstream URL is used as written, query string included, so a catch-up parameter appended by a
 player reaches the origin. `https:/` with one slash is accepted too, for clients and proxies that
-collapse `//`. The access log shows the path with password, keys and templates replaced by `…`.
+collapse `//`. In the URLs the proxy writes itself (playlists, HDHomeRun lineup) the upstream URL
+is `m=<base64url>` instead: players and servers normalise query strings (Plex turns `%3D` into
+`=`), which breaks origins whose query carries a filter or a token. The access log shows the path
+with password, keys and templates replaced by `…` and `m=` decoded; a request that fails on the
+proxy's or the origin's side also logs its reason.
 
 ## How the manifest is rewritten
 
@@ -97,6 +104,31 @@ GPAC is built from a pinned commit with the patches in [`gpac/`](gpac/) (see the
 They should go upstream; drop each one once GPAC has its fix. Two GPAC limits remain: its
 downloader ignores `Content-Encoding` (the proxy passes the manifest type explicitly so GPAC
 does not have to detect it), and its option parser breaks on a URL with `://` inside its path.
+
+## HLS
+
+`hls` serves the manifest as HLS, with the origin's whole time-shift window: one variant (the
+best video representation; ffmpeg opens every variant to probe it) and every audio adaptation
+set as an audio rendition. Media playlists and segments sit below
+`/<password>/hls/[<keys>/]m=<base64url manifest URL>/<rendition>/`, so segments are short
+relative names (`<period start ms>/init.mp4`, `<period start ms>/<number or time>.m4s`) and a
+three-hour playlist stays a few hundred KB. The proxy resolves a segment name against the
+manifest (cached: at most 1 s old for a playlist, up to 5 minutes for a segment, refetched when
+the period is unknown), fetches it and decrypts it if protected. Periods are separated by
+`EXT-X-DISCONTINUITY`. Without segment numbers in the manifest, the media sequence is counted on
+the video segments' grid, so audio and video agree and stay stable across reloads.
+
+ffmpeg reads the separate audio and video playlists in turns, which delays its start by a few
+seconds; `ts` starts faster in ffmpeg-based servers.
+
+## HDHomeRun (Plex Live TV)
+
+Plex Live TV only takes HDHomeRun tuners. `/<password>/hdhr/<playlist url>` is one: enter it as
+the tuner's address; the client appends `/discover.json`, `/lineup.json`, `/lineup_status.json`
+or `/device.xml`. The lineup is the playlist's entries that `m3u-ts` routes through `ts`, numbered
+by `tvg-chno`, so each channel is one MPEG-TS stream. The tuner's id derives from the playlist
+URL; `hdhr.tuners` (default 6) is how many channels may play at once. Use the playlist's XMLTV
+guide as the guide source.
 
 ## Player workarounds
 

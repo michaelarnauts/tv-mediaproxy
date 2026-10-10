@@ -2,6 +2,7 @@ pub mod config;
 pub mod drm;
 pub mod error;
 pub mod handler;
+pub mod hdhr;
 pub mod hls;
 pub mod m3u;
 pub mod metrics;

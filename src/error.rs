@@ -34,7 +34,7 @@ pub enum AppError {
 
 impl ResponseError for AppError {
     fn error_response(&self) -> HttpResponse {
-        match self {
+        let response = match self {
             AppError::Auth(msg) => HttpResponse::Unauthorized().json(json!({ "error": msg })),
             AppError::Proxy(msg) => HttpResponse::BadGateway().json(json!({ "error": msg })),
             AppError::Internal(msg) => {
@@ -48,7 +48,12 @@ impl ResponseError for AppError {
             AppError::SerdeJsonError(err) => {
                 HttpResponse::InternalServerError().json(json!({ "error": err.to_string() }))
             }
+        };
+        // Client errors are in the access log; failures need their reason.
+        if response.status().is_server_error() {
+            tracing::warn!("{self}");
         }
+        response
     }
 }
 

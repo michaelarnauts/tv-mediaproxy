@@ -15,6 +15,8 @@
 //!   `hls/[{keys}/]m={base64url(manifest URL)}/{rendition}/{file}`,
 //! - `m3u-hls`: like `m3u`, routing ClearKey and unprotected MPD entries
 //!   through `hls`,
+//! - `hdhr`: an HDHomeRun tuner whose channels are the playlist's `ts`
+//!   entries (see `hdhr`); the client appends `/discover.json` and the like,
 //! - `seg`: an init or media segment of protected content. Both resolve from
 //!   the same `BaseURL`, so the URL tells them apart: one that matches the
 //!   media template is a media segment and gets decrypted with its init
@@ -32,6 +34,7 @@ use base64::Engine;
 use futures::TryStreamExt;
 use reqwest::header::HeaderMap;
 
+use crate::hdhr;
 use crate::hls::{master_playlist, media_playlist, resolve, HlsParams};
 use crate::{
     config::Config,
@@ -50,6 +53,7 @@ pub struct InitCache(pub moka::future::Cache<String, bytes::Bytes>);
 
 #[derive(Debug, PartialEq)]
 enum Kind {
+    Hdhr,
     Hls,
     M3u,
     M3uHls,
@@ -196,6 +200,27 @@ pub async fn proxy_handler(
             };
             (body, "video/mp4")
         }
+        Kind::Hdhr => {
+            let (playlist, file) = hdhr::split(&target.url);
+            let base = format!("{prefix}/hdhr/{playlist}");
+            let id = hdhr::device_id(playlist);
+            match file {
+                hdhr::File::Discover => (
+                    hdhr::discover(&base, &id, config.hdhr.tuners).into(),
+                    "application/json",
+                ),
+                hdhr::File::LineupStatus => (hdhr::lineup_status().into(), "application/json"),
+                hdhr::File::DeviceXml => (hdhr::device_xml(&base, &id).into(), "application/xml"),
+                hdhr::File::Lineup => {
+                    let m3u = stream_manager
+                        .fetch_bytes(playlist.to_string(), HeaderMap::new())
+                        .await?;
+                    let routed = rewrite_m3u(&String::from_utf8_lossy(&m3u), &prefix, Output::Ts);
+                    let channels = hdhr::channels(&routed, &format!("{prefix}/ts/"));
+                    (hdhr::lineup(&channels).into(), "application/json")
+                }
+            }
+        }
         Kind::M3u | Kind::M3uHls | Kind::M3uTs => {
             let output = match target.kind {
                 Kind::M3u => Output::Mpd,
@@ -331,7 +356,7 @@ async fn fetch_init(sm: &StreamManager, cache: &InitCache, url: String) -> AppRe
 fn parse_target(path: &str, query: &str, password: &str) -> AppResult<Target> {
     let usage = || {
         AppError::BadRequest(
-            "Expected /{password}/{m3u|m3u-hls|m3u-ts|mpd|hls|seg|ts}/…/https://…".into(),
+            "Expected /{password}/{m3u|m3u-hls|m3u-ts|mpd|hls|seg|ts|hdhr}/…/https://…".into(),
         )
     };
     let path = path.strip_prefix('/').unwrap_or(path);
@@ -341,6 +366,7 @@ fn parse_target(path: &str, query: &str, password: &str) -> AppResult<Target> {
     }
     let (kind, mut rest) = rest.split_once('/').ok_or_else(usage)?;
     let kind = match kind {
+        "hdhr" => Kind::Hdhr,
         "hls" => Kind::Hls,
         "m3u" => Kind::M3u,
         "m3u-hls" => Kind::M3uHls,
@@ -359,7 +385,7 @@ fn parse_target(path: &str, query: &str, password: &str) -> AppResult<Target> {
         url: String::new(),
     };
     while !is_upstream_url(rest) {
-        let (segment, tail) = rest.split_once('/').ok_or_else(usage)?;
+        let (segment, tail) = rest.split_once('/').unwrap_or((rest, ""));
         let segment = urlencoding::decode(segment)
             .map_err(|_| AppError::BadRequest("Bad path segment".into()))?;
         if is_key_list(&segment) {
@@ -376,15 +402,16 @@ fn parse_target(path: &str, query: &str, password: &str) -> AppResult<Target> {
                 .ok_or_else(|| AppError::BadRequest("Bad t= segment".into()))?;
             target.templates = Some(templates);
         } else if let Some(encoded) = segment.strip_prefix("m=") {
-            // An HLS media playlist or segment: the manifest is encoded, and
-            // the rest of the path names a file below it.
-            target.url = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(encoded)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .filter(|u| is_upstream_url(u))
+            // The upstream URL, encoded: clients cannot rewrite its query.
+            // Below it, HLS names its playlists and segments.
+            target.url = decode_upstream(encoded)
                 .ok_or_else(|| AppError::BadRequest("Bad m= segment".into()))?;
-            target.hls_path = Some(tail.to_string());
+            if !tail.is_empty() {
+                if target.kind != Kind::Hls {
+                    return Err(AppError::BadRequest("Nothing may follow m=".into()));
+                }
+                target.hls_path = Some(tail.to_string());
+            }
             return Ok(target);
         } else {
             return Err(AppError::BadRequest(format!(
@@ -419,9 +446,13 @@ pub fn redacted_path(path: &str) -> String {
     let mut out = format!("/…/{kind}");
     while !rest.is_empty() && !is_upstream_url(rest) {
         let (segment, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        if segment.starts_with("m=") {
-            out.push_str("/m=…/");
-            out.push_str(tail);
+        if let Some(encoded) = segment.strip_prefix("m=") {
+            out.push_str("/m=");
+            out.push_str(decode_upstream(encoded).as_deref().unwrap_or("?"));
+            if !tail.is_empty() {
+                out.push_str(" /");
+                out.push_str(tail);
+            }
             return out;
         }
         out.push_str(if segment.starts_with("t=") {
@@ -436,6 +467,24 @@ pub fn redacted_path(path: &str) -> String {
         out.push_str(rest);
     }
     out
+}
+
+/// The upstream URL of an `m=` segment.
+fn decode_upstream(encoded: &str) -> Option<String> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|u| is_upstream_url(u))
+}
+
+/// `m=` followed by `url`, base64url: an upstream URL in a path, so that
+/// clients that normalise query strings cannot change what reaches it.
+pub fn encode_upstream(url: &str) -> String {
+    format!(
+        "m={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(url)
+    )
 }
 
 /// Whether the rest of a path is the upstream URL. `https:/` with a single
@@ -524,5 +573,24 @@ mod tests {
             redacted_path("/pw/m3u/https://tv/iptv.m3u"),
             "/…/m3u/https://tv/iptv.m3u"
         );
+        let m = encode_upstream("https://cdn/a.mpd?f=1");
+        assert_eq!(
+            redacted_path(&format!("/pw/hls/{KEY}/{m}/v/index.m3u8")),
+            "/…/hls/…/m=https://cdn/a.mpd?f=1 /v/index.m3u8"
+        );
+    }
+
+    #[test]
+    fn parses_encoded_upstream() {
+        let m = encode_upstream("https://cdn/a.mpd?f=%28x%3D1%29");
+        let t = parse_target(&format!("/pw/ts/{KEY}/{m}"), "", "pw").unwrap();
+        assert_eq!(t.kind, Kind::Ts);
+        assert_eq!(t.url, "https://cdn/a.mpd?f=%28x%3D1%29");
+        assert!(matches!(
+            parse_target(&format!("/pw/ts/{m}/extra"), "", "pw"),
+            Err(AppError::BadRequest(_))
+        ));
+        let t = parse_target(&format!("/pw/hls/{m}/a0/index.m3u8"), "", "pw").unwrap();
+        assert_eq!(t.hls_path.as_deref(), Some("a0/index.m3u8"));
     }
 }

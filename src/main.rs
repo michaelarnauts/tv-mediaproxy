@@ -9,6 +9,7 @@ mod config;
 mod drm;
 mod error;
 mod handler;
+mod hdhr;
 mod hls;
 mod m3u;
 mod metrics;

@@ -141,6 +141,38 @@ impl Default for MpdConfig {
 }
 
 // ---------------------------------------------------------------------------
+// MPEG-TS (GPAC) config
+// ---------------------------------------------------------------------------
+
+fn default_ts_gpac() -> String {
+    "gpac".into()
+}
+
+fn default_ts_start_buffer() -> u64 {
+    12
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TsConfig {
+    /// The `gpac` binary that plays a manifest into MPEG-TS.
+    #[serde(default = "default_ts_gpac")]
+    pub gpac: String,
+    /// Seconds of already published media to start with: what the player
+    /// (or a server's ffmpeg) gets at once to fill its buffer.
+    #[serde(default = "default_ts_start_buffer")]
+    pub start_buffer: u64,
+}
+
+impl Default for TsConfig {
+    fn default() -> Self {
+        Self {
+            gpac: default_ts_gpac(),
+            start_buffer: default_ts_start_buffer(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root config
 // ---------------------------------------------------------------------------
 
@@ -151,6 +183,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub mpd: MpdConfig,
+    #[serde(default)]
+    pub ts: TsConfig,
     /// Log filter directive (e.g. "debug", "info", "tv_mediaproxy=debug,info").
     /// Overrides the RUST_LOG env var when set.
     #[serde(default = "default_log_level")]
@@ -280,7 +314,10 @@ impl Config {
             // Auth
             .set_default("auth.api_password", "")?
             // MPD
-            .set_default("mpd.init_cache_ttl", 600)?;
+            .set_default("mpd.init_cache_ttl", 600)?
+            // MPEG-TS
+            .set_default("ts.gpac", "gpac")?
+            .set_default("ts.start_buffer", 12)?;
 
         if let Ok(config_path) = std::env::var("CONFIG_PATH") {
             let path = Path::new(&config_path);

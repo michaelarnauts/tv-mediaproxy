@@ -9,14 +9,16 @@ mod config;
 mod drm;
 mod error;
 mod handler;
+mod hls;
 mod m3u;
 mod metrics;
 mod mpd;
 mod proxy;
+mod ts;
 mod utils;
 
 use config::Config;
-use handler::InitCache;
+use handler::{InitCache, MpdCache};
 use metrics::AppMetrics;
 use proxy::stream::StreamManager;
 
@@ -60,6 +62,14 @@ async fn main() -> std::io::Result<()> {
             .build(),
     ));
 
+    // How fresh an entry must be depends on the request: see `fetch_mpd`.
+    let mpd_cache = web::Data::new(MpdCache(
+        moka::future::Cache::builder()
+            .max_capacity(100)
+            .time_to_live(handler::MPD_MAX_AGE_SEGMENT)
+            .build(),
+    ));
+
     tracing::info!(
         "Starting tv-mediaproxy on {}:{}",
         server_config.server.host,
@@ -79,6 +89,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Arc::clone(&server_config)))
             .app_data(web::Data::new(app_metrics.clone()))
             .app_data(init_cache.clone())
+            .app_data(mpd_cache.clone())
             .route("/health", web::get().to(|| async { "OK" }))
             .route("/metrics", web::get().to(metrics::metrics_handler))
             .default_service(web::get().to(handler::proxy_handler))

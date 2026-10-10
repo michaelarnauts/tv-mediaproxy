@@ -1,3 +1,4 @@
-# The image only needs the prebuilt binary.
+# The image only needs the prebuilt binary and the GPAC patches.
 *
 !dist/tv-mediaproxy
+!gpac/*.patch

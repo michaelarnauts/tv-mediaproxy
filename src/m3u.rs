@@ -1,10 +1,13 @@
 //! M3U playlist rewrite.
 //!
 //! Every ClearKey-protected MPD entry is routed through this proxy as
-//! `{prefix}/mpd/{kid}:{key}/{url}`, with the keys from
-//! `#KODIPROP:inputstream.adaptive.license_key`. Those entries lose their
-//! `inputstream.adaptive.*` KODIPROPs: the proxied stream is no longer
-//! encrypted. Everything else is passed through unchanged.
+//! `{prefix}/{kind}/{kid}:{key}/{url}`, with the keys from
+//! `#KODIPROP:inputstream.adaptive.license_key`, `kind` being `mpd` or `ts`.
+//! For `ts` and `hls`, unprotected MPD entries go through it too, as
+//! `{prefix}/{kind}/{url}`. Routed entries lose their `inputstream.adaptive.*`
+//! KODIPROPs: the proxied stream is no longer encrypted (nor, for `ts` and
+//! `hls`, DASH).
+//! Everything else is passed through unchanged.
 
 use std::collections::HashMap;
 
@@ -12,8 +15,24 @@ use crate::handler::is_key_list;
 
 const ADAPTIVE_PROP: &str = "#KODIPROP:inputstream.adaptive.";
 
+/// What routed MPD entries become.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Output {
+    /// A decrypted DASH manifest.
+    Mpd,
+    /// An HLS master playlist.
+    Hls,
+    /// A continuous MPEG-TS stream.
+    Ts,
+}
+
 /// `prefix` is the proxy's public base URL including the password.
-pub fn rewrite_m3u(content: &str, prefix: &str) -> String {
+pub fn rewrite_m3u(content: &str, prefix: &str, output: Output) -> String {
+    let kind = match output {
+        Output::Mpd => "mpd",
+        Output::Hls => "hls",
+        Output::Ts => "ts",
+    };
     let mut out = String::with_capacity(content.len() + 4096);
     // Lines between two stream URLs are held back until the URL is seen,
     // since the KODIPROPs that decide the rewrite precede it.
@@ -32,8 +51,12 @@ pub fn rewrite_m3u(content: &str, prefix: &str) -> String {
         let is_mpd = props.get("manifest_type").map(String::as_str) == Some("mpd")
             || url::Url::parse(url).is_ok_and(|u| u.path().ends_with(".mpd"));
 
+        let unprotected = !props.contains_key("license_type");
         let proxied = match key {
-            Some(key) if clear_key && is_mpd => Some(format!("{prefix}/mpd/{key}/{url}")),
+            Some(key) if clear_key && is_mpd => Some(format!("{prefix}/{kind}/{key}/{url}")),
+            _ if output != Output::Mpd && unprotected && is_mpd => {
+                Some(format!("{prefix}/{kind}/{url}"))
+            }
             _ => None,
         };
         for l in pending.drain(..) {
@@ -76,7 +99,7 @@ mod tests {
              #KODIPROP:inputstream.adaptive.license_key={KEY}\nhttps://cdn/a/.mpd?x=1\n\n\
              #EXTINF:-1,B\nhttps://cdn/b.m3u8\n"
         );
-        let out = rewrite_m3u(&m3u, "http://p/pw");
+        let out = rewrite_m3u(&m3u, "http://p/pw", Output::Mpd);
         assert!(!out.contains("KODIPROP"), "{out}");
         assert!(
             out.contains(&format!(
@@ -90,6 +113,23 @@ mod tests {
     #[test]
     fn unprotected_mpd_is_untouched() {
         let m3u = "#EXTM3U\n#EXTINF:-1,C\nhttps://cdn/c.mpd\n";
-        assert_eq!(rewrite_m3u(m3u, "http://p/pw"), m3u);
+        assert_eq!(rewrite_m3u(m3u, "http://p/pw", Output::Mpd), m3u);
+    }
+
+    #[test]
+    fn ts_routes_protected_and_unprotected_mpds() {
+        let m3u = format!(
+            "#EXTM3U\n#EXTINF:-1,A\n#KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey\n\
+             #KODIPROP:inputstream.adaptive.license_key={KEY}\nhttps://cdn/a.mpd\n\
+             #EXTINF:-1,C\nhttps://cdn/c.mpd\n#EXTINF:-1,R\nhttps://cdn/r.mp3\n"
+        );
+        let out = rewrite_m3u(&m3u, "http://p/pw", Output::Ts);
+        assert_eq!(
+            out,
+            format!(
+                "#EXTM3U\n#EXTINF:-1,A\nhttp://p/pw/ts/{KEY}/https://cdn/a.mpd\n\
+                 #EXTINF:-1,C\nhttp://p/pw/ts/https://cdn/c.mpd\n#EXTINF:-1,R\nhttps://cdn/r.mp3\n"
+            )
+        );
     }
 }

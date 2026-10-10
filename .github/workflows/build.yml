@@ -1,7 +1,8 @@
 name: Build
 
-# One compile: a static (musl) Linux x86-64 binary. The Docker image wraps it
-# and a v* tag also attaches it to a GitHub release.
+# One compile: a static (musl) Linux x86-64 binary. The Docker image wraps it,
+# with GPAC built in its own (cached) stage, and a v* tag also attaches the
+# binary to a GitHub release.
 
 on:
   push:
@@ -88,6 +89,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Keeps the GPAC build stage between runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release:
     name: GitHub release

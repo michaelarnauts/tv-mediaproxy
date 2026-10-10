@@ -56,3 +56,10 @@ api_password = "your-password"  # Required: the first path segment of every URL
 # ---------------------------------------------------------------------------
 [mpd]
 init_cache_ttl     = 600  # Seconds to cache init segments (each media segment needs one to decrypt)
+
+# ---------------------------------------------------------------------------
+# MPEG-TS
+# ---------------------------------------------------------------------------
+[ts]
+gpac = "gpac"         # The (patched, see gpac/) gpac binary behind /ts/
+start_buffer = 12     # Seconds of already published media to start with

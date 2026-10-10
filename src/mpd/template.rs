@@ -52,17 +52,35 @@ fn pattern(template: &str) -> Option<Regex> {
 
 /// Fill in `$RepresentationID$` and `$Bandwidth$`; other identifiers stay.
 pub fn fill(template: &str, rep: Option<&str>, bandwidth: Option<&str>) -> String {
+    fill_with(template, |name| match name {
+        "RepresentationID" => rep.map(str::to_string),
+        "Bandwidth" => bandwidth.map(str::to_string),
+        _ => None,
+    })
+}
+
+/// Fill in every identifier of one segment's URL.
+pub fn fill_segment(template: &str, rep: &str, bandwidth: u64, number: u64, time: u64) -> String {
+    fill_with(template, |name| match name {
+        "RepresentationID" => Some(rep.to_string()),
+        "Bandwidth" => Some(bandwidth.to_string()),
+        "Number" => Some(number.to_string()),
+        "Time" => Some(time.to_string()),
+        _ => None,
+    })
+}
+
+/// Replace each `$Name[%0Nd]$` for which `value` has one; others stay.
+fn fill_with(template: &str, value: impl Fn(&str) -> Option<String>) -> String {
     let mut parts = template.split('$');
     let mut out = parts.next().unwrap_or_default().to_string();
     while let Some(ident) = parts.next() {
         let (name, format) = ident.split_once('%').unwrap_or((ident, ""));
         let value = match name {
-            "" => Some("$"),
-            "RepresentationID" => rep,
-            "Bandwidth" => bandwidth,
-            _ => None,
+            "" => Some("$".to_string()),
+            _ => value(name),
         };
-        match value {
+        match value.as_deref() {
             Some(v) => {
                 let width = format
                     .strip_prefix('0')
@@ -138,6 +156,16 @@ mod tests {
                 Some("42")
             ),
             "v1/00042-$-$Time$.mp4"
+        );
+        assert_eq!(
+            fill_segment(
+                "$RepresentationID$-$Number%06d$-$Time$.m4s",
+                "a",
+                1,
+                42,
+                900
+            ),
+            "a-000042-900.m4s"
         );
     }
 }

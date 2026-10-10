@@ -102,6 +102,7 @@ GPAC is built from a pinned commit with the patches in [`gpac/`](gpac/) (see the
 | `0004` | The presentation delay also delayed segment availability, so GPAC waited up to a segment duration for a segment that was long published. |
 | `0005` | Fractional seconds in manifest durations were read as milliseconds (`PT0.5S` gave 5 ms), so a live period start with nanosecond precision landed hours in the future and the stream ended after a few seconds. |
 | `0006` | Over HTTP/2, a manifest update whose data had already arrived through another download on the shared connection was never processed; the stream stopped for good. |
+| `0007` | On a manifest update the segment position moved once per quality, so GPAC went back and fetched segments again; with timelines on both the AdaptationSet and its representations it took the overridden one and waited forever. |
 
 They should go upstream; drop each one once GPAC has its fix. Two GPAC limits remain: its
 downloader ignores `Content-Encoding` (the proxy passes the manifest type explicitly so GPAC

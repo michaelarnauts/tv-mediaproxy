@@ -1,0 +1,38 @@
+From a67c75e6b683b2f765cca2534c182a183768b174 Mon Sep 17 00:00:00 2001
+From: tv-mediaproxy <noreply@localhost>
+Date: Sat, 10 Oct 2026 11:36:55 +0000
+Subject: [PATCH 5/6] mpd: parse fractional seconds of xs:duration as a decimal
+ fraction
+
+gf_mpd_parse_duration took the digits after the decimal point as a
+number of milliseconds: PT0.5S gave 5 ms and PT1.058545616S gave
+58545617 ms. A live MPD whose Period@start has nanosecond precision
+then puts the period hours in the future.
+---
+ src/media_tools/mpd.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/media_tools/mpd.c b/src/media_tools/mpd.c
+index beeb9d0..57b90de 100644
+--- a/src/media_tools/mpd.c
++++ b/src/media_tools/mpd.c
+@@ -222,10 +222,15 @@ static u64 gf_mpd_parse_duration(const char * const duration)
+ 		char *sep_dec = strchr(sep2, '.');
+ 		*sep1 = 0;
+ 		if (sep_dec) {
++			u32 k, scale = 100;
+ 			sep_dec[0] = 0;
+ 			s = atoi(sep2);
+-			ms = atoi(sep_dec+1);
+ 			sep_dec[0] = '.';
++			//decimal fraction of a second, kept to the millisecond: ".5" is 500 ms
++			for (k=1; (k<=3) && (sep_dec[k]>='0') && (sep_dec[k]<='9'); k++) {
++				ms += (sep_dec[k] - '0') * scale;
++				scale /= 10;
++			}
+ 		} else {
+ 			s = atoi(sep2);
+ 		}
+-- 
+2.43.0
+

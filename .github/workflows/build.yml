@@ -4,12 +4,13 @@ name: Build
 # with GPAC built in its own (cached) stage, and a v* tag also attaches the
 # binary to a GitHub release.
 
+# Our code lives on `tv`; `main` mirrors upstream and builds nothing here.
 on:
   push:
-    branches: [ main ]
+    branches: [ tv ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ tv ]
   workflow_dispatch:
 
 env:
@@ -76,7 +77,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch,prefix=dev-
             type=semver,pattern={{version}}
             type=sha
 

@@ -16,6 +16,8 @@ requested.
 Everything else upstream ships (HLS proxy, DASH→HLS, extractors, Xtream, Telegram, Acestream,
 transcoding, EPG, web UI, speedtest, mobile builds) has been removed.
 
+This fork lives on the `tv` branch; `main` mirrors upstream.
+
 ## Usage
 
 Put the proxy in front of the playlist URL:
@@ -120,7 +122,7 @@ API_PASSWORD=secret APP__SERVER__HOST=0.0.0.0 ./target/release/tv-mediaproxy
 ```
 
 Or download the static Linux x86-64 binary from a release, or run the Docker image
-`ghcr.io/michaelarnauts/tv-mediaproxy` (`:latest` follows `main`, a `v*` tag publishes
+`ghcr.io/michaelarnauts/tv-mediaproxy` (`:dev-tv` follows the `tv` branch, a `v*` tag publishes
 `:<version>` and a release with the binary). The binary alone serves everything but `ts`, which
 needs the patched `gpac` (path in `ts.gpac`, default `gpac` on the `PATH`).
 

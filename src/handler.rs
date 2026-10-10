@@ -211,13 +211,28 @@ pub async fn proxy_handler(
                 ),
                 hdhr::File::LineupStatus => (hdhr::lineup_status().into(), "application/json"),
                 hdhr::File::DeviceXml => (hdhr::device_xml(&base, &id).into(), "application/xml"),
-                hdhr::File::Lineup => {
+                hdhr::File::Lineup | hdhr::File::Guide => {
                     let m3u = stream_manager
                         .fetch_bytes(playlist.to_string(), HeaderMap::new())
                         .await?;
-                    let routed = rewrite_m3u(&String::from_utf8_lossy(&m3u), &prefix, Output::Ts);
+                    let m3u = String::from_utf8_lossy(&m3u);
+                    let routed = rewrite_m3u(&m3u, &prefix, Output::Ts);
                     let channels = hdhr::channels(&routed, &format!("{prefix}/ts/"));
-                    (hdhr::lineup(&channels).into(), "application/json")
+                    if file == hdhr::File::Lineup {
+                        (hdhr::lineup(&channels).into(), "application/json")
+                    } else {
+                        let url = hdhr::guide_url(&m3u).ok_or_else(|| {
+                            AppError::NotFound("The playlist names no guide (x-tvg-url)".into())
+                        })?;
+                        let xml = stream_manager
+                            .fetch_bytes(url.clone(), HeaderMap::new())
+                            .await?;
+                        let xml = gunzip(xml)
+                            .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
+                        let guide = hdhr::guide(&xml, &channels)
+                            .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
+                        (guide.into(), "application/xml")
+                    }
                 }
             }
         }
@@ -338,6 +353,16 @@ fn playlist_response(playlist: String) -> HttpResponse {
         .content_type("application/vnd.apple.mpegurl")
         .insert_header(("cache-control", "no-cache"))
         .body(playlist)
+}
+
+/// `data` unpacked if it is a gzip file (`.xml.gz` guides).
+fn gunzip(data: bytes::Bytes) -> std::io::Result<bytes::Bytes> {
+    if !data.starts_with(&[0x1f, 0x8b]) {
+        return Ok(data);
+    }
+    let mut out = Vec::with_capacity(data.len() * 8);
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&data[..]), &mut out)?;
+    Ok(out.into())
 }
 
 /// An init segment, from the cache when its representation was seen before.

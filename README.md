@@ -127,8 +127,12 @@ Plex Live TV only takes HDHomeRun tuners. `/<password>/hdhr/<playlist url>` is o
 the tuner's address; the client appends `/discover.json`, `/lineup.json`, `/lineup_status.json`
 or `/device.xml`. The lineup is the playlist's entries that `m3u-ts` routes through `ts`, numbered
 by `tvg-chno`, so each channel is one MPEG-TS stream. The tuner's id derives from the playlist
-URL; `hdhr.tuners` (default 6) is how many channels may play at once. Use the playlist's XMLTV
-guide as the guide source.
+URL; `hdhr.tuners` (default 6) is how many channels may play at once.
+
+HDHomeRun lineups carry no guide ids, so clients match an XMLTV guide by channel number. Use
+`…/hdhr/<playlist url>/guide.xml` as the guide: the playlist's own guide (`x-tvg-url`) reduced to
+the lineup's channels, each with the playlist's name, number (`tvg-chno`) and logo, matched by
+`tvg-id`.
 
 ## Player workarounds
 

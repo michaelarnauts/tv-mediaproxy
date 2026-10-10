@@ -2971,6 +2971,7 @@ dependencies = [
  "ctr",
  "dash-mpd-core",
  "dashmap",
+ "flate2",
  "futures",
  "hex",
  "moka",

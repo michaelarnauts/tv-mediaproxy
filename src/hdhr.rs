@@ -207,10 +207,21 @@ pub fn discover(base: &str, device_id: &str, tuners: usize) -> String {
     .to_string()
 }
 
+/// Entries as a real HDHomeRun writes them, codecs included. The codecs are
+/// assumed: H.264 and AAC, what the sources carry and `ts` passes through.
 pub fn lineup(channels: &[Channel]) -> String {
     let entries: Vec<_> = channels
         .iter()
-        .map(|c| json!({ "GuideNumber": c.number, "GuideName": c.name, "URL": c.url }))
+        .map(|c| {
+            json!({
+                "GuideNumber": c.number,
+                "GuideName": c.name,
+                "VideoCodec": "H264",
+                "AudioCodec": "AAC",
+                "HD": 1,
+                "URL": c.url,
+            })
+        })
         .collect();
     serde_json::Value::Array(entries).to_string()
 }
@@ -280,7 +291,7 @@ mod tests {
         let channels = channels(m3u, "http://p/pw/ts/");
         assert_eq!(
             lineup(&channels),
-            r#"[{"GuideName":"Channel A","GuideNumber":"7","URL":"http://p/pw/ts/https://cdn/a.mpd"},{"GuideName":"Channel B","GuideNumber":"2","URL":"http://p/pw/ts/https://cdn/b.mpd"}]"#
+            r#"[{"AudioCodec":"AAC","GuideName":"Channel A","GuideNumber":"7","HD":1,"URL":"http://p/pw/ts/https://cdn/a.mpd","VideoCodec":"H264"},{"AudioCodec":"AAC","GuideName":"Channel B","GuideNumber":"2","HD":1,"URL":"http://p/pw/ts/https://cdn/b.mpd","VideoCodec":"H264"}]"#
         );
     }
 

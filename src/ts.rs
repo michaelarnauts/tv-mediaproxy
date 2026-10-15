@@ -170,8 +170,7 @@ fn live_edge(mpd: &MPD, now: f64) -> Option<f64> {
 fn gpac_args(url: &str, keys: Option<&str>, spd_ms: i64) -> Vec<String> {
     let mut args = vec![
         "-logs=all@warning:ncl".into(),
-        // Not -ua: GPAC stores that as `user-agent`, its downloader reads `ua`.
-        format!("-cfg=core:ua={}", crate::USER_AGENT),
+        format!("-ua={}", crate::USER_AGENT),
         "-i".into(),
         // `:gpac:` ends the URL for GPAC's option parser. The mime type spares
         // probing, which fails on gzip-encoded manifests. GPAC starts the
@@ -216,7 +215,7 @@ mod tests {
             args,
             [
                 "-logs=all@warning:ncl",
-                &format!("-cfg=core:ua={}", crate::USER_AGENT),
+                &format!("-ua={}", crate::USER_AGENT),
                 "-i",
                 "https://cdn/a.mpd?x=1:gpac:mime=application/dash+xml:algo=none:start_with=max_bw:spd=-4000",
                 "cdcrypt:kids=0xaa,0xcc:keys=0xbb,0xdd",

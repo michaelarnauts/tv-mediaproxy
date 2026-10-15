@@ -80,6 +80,7 @@ playlist was fetched from.
 | `0005` | [#3990](https://github.com/gpac/gpac/pull/3990) | fractional seconds in durations were read as milliseconds |
 | `0006` | [#3996](https://github.com/gpac/gpac/pull/3996) | an HTTP/2 manifest update could be lost, ending the stream |
 | `0007` | [#3994](https://github.com/gpac/gpac/pull/3994) | the segment position moved once per quality on each update |
+| `0008` | [#3997](https://github.com/gpac/gpac/pull/3997) | `-user-agent`/`-ua` never reached HTTP requests |
 
 ## Credits
 

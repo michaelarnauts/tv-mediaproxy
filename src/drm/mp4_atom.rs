@@ -1,6 +1,4 @@
 //! Minimal MP4 box (atom) parser.
-//!
-//! Ports `MP4Atom` and `MP4Parser` from `drm/decrypter.py`.
 
 // ---------------------------------------------------------------------------
 // Mp4Atom

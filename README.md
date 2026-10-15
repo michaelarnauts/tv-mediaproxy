@@ -1,184 +1,86 @@
-# tv-mediaproxy — DASH ClearKey passthrough
+# tv-mediaproxy
 
-A cut-down fork of [mediaflow-proxy-light](https://github.com/mhdzumair/mediaflow-proxy-light)
-that does one thing: play ClearKey-protected MPEG-DASH streams in players that cannot decrypt
-them themselves. It serves them two ways:
-
-- as **DASH** (`mpd`), for DASH players without ClearKey support,
-- as one continuous **MPEG-TS** stream (`ts`), played by [GPAC](https://gpac.io) on the server,
-  for players and servers that are better at TS than at live DASH (Jellyfin, VLC, …).
-
-Unlike upstream it does **not** convert DASH to HLS. The manifest stays a DASH manifest, with all
-its periods and the origin's whole time-shift window, so a player can seek back as far as the
-origin allows. Only addressing and protection change; segments are decrypted as they are
-requested.
-
-Everything else upstream ships (HLS proxy, DASH→HLS, extractors, Xtream, Telegram, Acestream,
-transcoding, EPG, web UI, speedtest, mobile builds) has been removed.
-
-This fork lives on the `tv` branch; `main` mirrors upstream.
+Plays ClearKey-protected MPEG-DASH in players that cannot decrypt it. Put the proxy in front of
+an M3U playlist whose DASH streams carry their ClearKey keys
+(`#KODIPROP:inputstream.adaptive.license_key=<kid>:<key>`).
 
 ## Usage
 
-Put the proxy in front of the playlist URL:
+Give your player one of these:
 
-```
-http://<host>:8888/<password>/m3u/https://tv.example/iptv.m3u
-```
-
-`<password>` is `API_PASSWORD`; the proxy refuses to start without one. `/health` and `/metrics`
-are open.
-
-Every path is `/<password>/<kind>/[<kid>:<key>[,…]/][t=<templates>/]<upstream URL>`, where `kind`
-says what the URL is:
-
-| Kind | The proxy |
+| URL | For |
 |---|---|
-| `m3u` | fetches the playlist and routes every MPD entry with `#KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey` and `license_key=<kid>:<key>[,…]` through itself as `/<password>/mpd/<kid>:<key>/<mpd url>`. Those entries lose their `inputstream.adaptive.*` KODIPROPs (the result is no longer encrypted); everything else is passed through untouched. |
-| `m3u-ts` | the same, but routes those entries to `ts`, and unprotected MPD entries too (as `/<password>/ts/<mpd url>`). |
-| `m3u-hls` | the same, routing them to `hls`. |
-| `mpd` | fetches the manifest and rewrites it, see below. Without keys only the addressing is rewritten. |
-| `seg` | fetches an init or media segment of protected content (the rewritten manifest builds these URLs). One that matches the media template in `t=` is a media segment and is decrypted; anything else is the init segment and loses its protection boxes. |
-| `ts` | plays the manifest with GPAC and streams it as MPEG-TS (`video/mp2t`), see below. The keys are optional. |
-| `hls` | turns the manifest into an HLS master playlist, see below. The keys are optional. |
-| `hdhr` | an HDHomeRun tuner for a playlist (`/<password>/hdhr/<playlist url>`), see below. |
+| `http://<host>:8888/m3u/<playlist url>` | DASH players. The streams stay DASH, decrypted, and you can still seek back as far as the origin allows. |
+| `http://<host>:8888/m3u-ts/<playlist url>` | Players that are better at MPEG-TS than at live DASH, like VLC. Every stream becomes one continuous MPEG-TS stream. |
+| `http://<host>:8888/hdhr/<playlist url>` | Plex and Jellyfin Live TV: an HDHomeRun tuner with the playlist's channels as MPEG-TS. Use `…/hdhr/<playlist url>/guide.xml` as its guide: the playlist's guide, limited to those channels. |
 
-The upstream URL is used as written, query string included, so a catch-up parameter appended by a
-player reaches the origin. `https:/` with one slash is accepted too, for clients and proxies that
-collapse `//`. In the URLs the proxy writes itself (playlists, HDHomeRun lineup) the upstream URL
-is `m=<base64url>` instead: players and servers normalise query strings (Plex turns `%3D` into
-`=`), which breaks origins whose query carries a filter or a token. The access log shows the path
-with password, keys and templates replaced by `…` and `m=` decoded; a request that fails on the
-proxy's or the origin's side also logs its reason.
+For example `http://192.168.1.10:8888/m3u-ts/https://tv.example/iptv.m3u`. The playlist URL is
+taken as written, query included.
 
-## How the manifest is rewritten
+## How it works
 
-- Every `BaseURL` is resolved against the manifest URL *after redirects* and removed. Each element
-  that owns a segment template gets one absolute `BaseURL` instead. (Players resolve a template
-  from the element that defines it; VLC ignores a `BaseURL` below that.)
-- For protected content that `BaseURL` points into this proxy:
-  `/<password>/seg/<kid>:<key>/t=<templates>/<origin base>`. The segment templates themselves are left
-  untouched, so the URLs the player builds carry the keys and `t=`: the absolute initialization and
-  media templates, base64url. To decrypt a media segment the proxy matches its URL against the
-  media template, fills the representation into the initialization template and fetches (and
-  caches) that init segment. No state is kept between requests.
-- Clear content (subtitles, unencrypted ad periods) keeps pointing at the origin.
-- `ContentProtection`, `Location` and `PatchLocation` are dropped.
-- `startNumber` is dropped from templates addressed by `$Time$` — a player workaround, see below.
+The playlist comes back with its streams pointing at the proxy:
 
-Everything else — timelines, periods, `availabilityStartTime`, `timeShiftBufferDepth`, events — is
-written back unchanged.
-
-Only `SegmentTemplate` addressing is rewritten. A representation using `SegmentBase` or
-`SegmentList` keeps an absolute origin `BaseURL`, so it only plays if it is not encrypted.
-
-Decryption supports `cenc` (AES-CTR) and, from upstream, `cbcs`/`cbc1`/`cens`; only `cenc` has
-been tested against live streams.
-
-## MPEG-TS through GPAC
-
-For `ts` the proxy starts one `gpac` process per request and streams its stdout; the process is
-killed when the client disconnects. GPAC is a full DASH client: it follows manifest updates and
-period changes, picks the top quality, decrypts with the keys from the URL and muxes the
-streams into MPEG-TS. The response starts once GPAC has produced its first bytes
-(typically under a second); a stream that cannot start is a 502.
-
-It starts `ts.start_buffer` seconds (default 12) before the newest segment the manifest lists.
-Those segments are already published, so the player — or a media server's ffmpeg, which wants a
-few seconds before it cuts its first HLS segment — gets them at once and starts with a full
-buffer; starting at the live point, it would get them one by one as they appear. The start is
-measured from the manifest rather than the clock because origins publish late, each by its own
-amount (from ~0 to ~30 s), whatever `suggestedPresentationDelay` they announce. (GPAC adds its
-`spd` option to the manifest's `suggestedPresentationDelay`, so the proxy passes the
-difference.)
-
-GPAC is built from a pinned commit with the patches in [`gpac/`](gpac/) (see the `Dockerfile`):
-
-| Patch | Fixes |
+| Route | Serves |
 |---|---|
-| `0001` | `cdcrypt` ignored keys given as `kids`/`keys` options when the init segment has a `pssh`, and output garbage. |
-| `0002` | A manifest written as `<MPD` followed by a newline was not recognised as DASH; another demuxer took it. |
-| `0003` | MPD updates from a server that always sends `Content-Encoding: gzip` failed to parse (GPAC's downloader does not decode it). |
-| `0004` | The presentation delay also delayed segment availability, so GPAC waited up to a segment duration for a segment that was long published. |
-| `0005` | Fractional seconds in manifest durations were read as milliseconds (`PT0.5S` gave 5 ms), so a live period start with nanosecond precision landed hours in the future and the stream ended after a few seconds. |
-| `0006` | Over HTTP/2, a manifest update whose data had already arrived through another download on the shared connection was never processed; the stream stopped for good. |
-| `0007` | On a manifest update the segment position moved once per quality, so GPAC went back and fetched segments again; with timelines on both the AdaptationSet and its representations it took the overridden one and waited forever. |
+| `/mpd/<keys>/<manifest>` | the manifest, rewritten so the segments of protected streams also go through the proxy (via `seg`), without its encryption. Everything else stays as it is. Supports `cenc` and `cbcs`. |
+| `/seg/<keys>/t=<templates>/<segment>` | a segment, decrypted. `t=` carries the init and media templates, so a media segment leads back to its init segment. |
+| `/ts/<keys>/<manifest>` | the stream played by [GPAC](https://gpac.io), one process per viewer, starting `TS_START_BUFFER` seconds behind the newest segment. |
 
-They should go upstream; drop each one once GPAC has its fix. Two GPAC limits remain: its
-downloader ignores `Content-Encoding` (the proxy passes the manifest type explicitly so GPAC
-does not have to detect it), and its option parser breaks on a URL with `://` inside its path.
-
-## HLS
-
-`hls` serves the manifest as HLS, with the origin's whole time-shift window: one variant (the
-best video representation; ffmpeg opens every variant to probe it) and every audio adaptation
-set as an audio rendition. Media playlists and segments sit below
-`/<password>/hls/[<keys>/]m=<base64url manifest URL>/<rendition>/`, so segments are short
-relative names (`<period start ms>/init.mp4`, `<period start ms>/<number or time>.m4s`) and a
-three-hour playlist stays a few hundred KB. The proxy resolves a segment name against the
-manifest (cached: at most 1 s old for a playlist, up to 5 minutes for a segment, refetched when
-the period is unknown), fetches it and decrypts it if protected. Periods are separated by
-`EXT-X-DISCONTINUITY`. Without segment numbers in the manifest, the media sequence is counted on
-the video segments' grid, so audio and video agree and stay stable across reloads.
-
-ffmpeg reads the separate audio and video playlists in turns, which delays its start by a few
-seconds; `ts` starts faster in ffmpeg-based servers.
-
-## HDHomeRun (Plex Live TV)
-
-Plex Live TV only takes HDHomeRun tuners. `/<password>/hdhr/<playlist url>` is one: enter it as
-the tuner's address; the client appends `/discover.json`, `/lineup.json`, `/lineup_status.json`
-or `/device.xml`. The lineup is the playlist's entries that `m3u-ts` routes through `ts`, numbered
-by `tvg-chno`, so each channel is one MPEG-TS stream. The tuner's id derives from the playlist
-URL; `hdhr.tuners` (default 6) is how many channels may play at once.
-
-HDHomeRun lineups carry no guide ids, so clients match an XMLTV guide by channel number. Use
-`…/hdhr/<playlist url>/guide.xml` as the guide: the playlist's own guide (`x-tvg-url`) reduced to
-the lineup's channels, each with the playlist's name, number (`tvg-chno`) and logo, matched by
-`tvg-id`.
-
-## Player workarounds
-
-These change the manifest for every player, not only the one that needs it.
-
-**`startNumber` on `$Time$` templates is dropped**, for ffmpeg up to 8.1 — the DASH demuxer
-Jellyfin uses. With a `startNumber` on a live `SegmentTimeline`, it reads the same segment again
-after every manifest reload: timestamps jump back, the stream crawls or stalls. With `$Time$`
-addressing the number is not part of any segment URL, so other players lose nothing. FFmpeg 9.0 has the fix (jellyfin-ffmpeg 8.1.3 does not).
-**Remove this once Jellyfin ships ffmpeg 9**: it is `merge_template` in `src/mpd/rewrite.rs`.
-
-Not a workaround, but a choice made for VLC: the proxy `BaseURL` goes on the element that defines
-the segment template rather than on each representation, because VLC 3 ignores a `BaseURL` below
-that element. Placed there it is valid DASH for every player.
+`<keys>` is `<kid>:<key>[,…]`, or `-` for a clear stream. These URLs carry the upstream URL as
+`m=<base64url>`, so no client can rewrite its query string (Plex does), and use the address the
+playlist was fetched from.
 
 ## Running
 
-```bash
-cargo build --release
-API_PASSWORD=secret APP__SERVER__HOST=0.0.0.0 ./target/release/tv-mediaproxy
-# then point a player at
-#   http://<host>:8888/secret/m3u/https://tv.example/iptv.m3u
-```
-
-Or download the static Linux x86-64 binary from a release, or run the Docker image
-`ghcr.io/michaelarnauts/tv-mediaproxy` (`:dev-tv` follows the `tv` branch, a `v*` tag publishes
-`:<version>` and a release with the binary). The binary alone serves everything but `ts`, which
-needs the patched `gpac` (path in `ts.gpac`, default `gpac` on the `PATH`).
-
-The image builds the patched GPAC itself and wraps a static binary built beforehand:
+### Docker
 
 ```bash
-cargo build --release --target x86_64-unknown-linux-musl   # needs musl-tools
-mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/tv-mediaproxy dist/
-docker build -t tv-mediaproxy .
+docker run -p 8888:8888 ghcr.io/michaelarnauts/tv-mediaproxy
 ```
 
-Configuration is by environment (`APP__SECTION__KEY`, plus upstream's `API_PASSWORD`, `PORT`,
-`PROXY_URL`, …) or a TOML file named by `CONFIG_PATH`; see `config-example.toml`.
+The image brings the patched GPAC (see Workarounds).
 
-URLs this proxy generates are built from the request's `Host` (and `X-Forwarded-*` headers), so
-fetch the playlist through the address the player will use.
+### Without Docker
 
-## License
+```bash
+cargo run --release
+```
 
-MIT, as upstream.
+`ts` (and so `m3u-ts` and `hdhr`) needs the patched `gpac` on the `PATH`; the rest works without.
+
+### Environment
+
+| Variable | Default | |
+|---|---|---|
+| `TS_START_BUFFER` | `12` | Seconds behind the newest segment that `ts` starts. Those segments are already published, so a client gets them at once: Jellyfin and Plex (ffmpeg) want a few seconds of media before they start, and would otherwise wait for them to appear one by one. |
+| `HDHR_TUNERS` | `6` | Tuners `hdhr` announces: how many channels a client may play at once. |
+| `RUST_LOG` | `info` | Log filter. |
+
+The proxy listens on port 8888.
+
+## Workarounds
+
+- **ffmpeg up to 8.1** (Jellyfin) repeats segments of a live `$Time$` timeline that has a
+  `startNumber`, so `mpd` drops it. Fixed in ffmpeg 9.0 by
+  [8a8bde6](https://github.com/FFmpeg/FFmpeg/commit/8a8bde6a54e282fe42a9cf9467c4af9c5fe009ab);
+  remove the workaround once Jellyfin ships it.
+- **VLC** ignores a `BaseURL` below the element that defines the segment template, so `mpd` puts
+  the `BaseURL` on that element.
+- **CDNs** may refuse clients that are not a browser, so the proxy and GPAC send a Chrome
+  User-Agent.
+- **GPAC** is built with these patches; drop one once GPAC merges its PR:
+
+| Patch | PR | Fixes |
+|---|---|---|
+| `0001` | [#3992](https://github.com/gpac/gpac/pull/3992) | `cdcrypt` ignored `kids`/`keys` for MP4 input |
+| `0002` | [#3991](https://github.com/gpac/gpac/pull/3991) | `<MPD` followed by a newline was not probed as DASH |
+| `0003` | [#3993](https://github.com/gpac/gpac/pull/3993) | gzip-encoded manifest updates failed to parse |
+| `0004` | [#3995](https://github.com/gpac/gpac/pull/3995) | the presentation delay also delayed segment availability |
+| `0005` | [#3990](https://github.com/gpac/gpac/pull/3990) | fractional seconds in durations were read as milliseconds |
+| `0006` | [#3996](https://github.com/gpac/gpac/pull/3996) | an HTTP/2 manifest update could be lost, ending the stream |
+| `0007` | [#3994](https://github.com/gpac/gpac/pull/3994) | the segment position moved once per quality on each update |
+
+## Credits
+
+- [mediaflow-proxy-light](https://github.com/mhdzumair/mediaflow-proxy-light) by Mohamed Zumair

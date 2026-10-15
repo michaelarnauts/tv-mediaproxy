@@ -191,7 +191,7 @@ fn write_channel(writer: &mut Writer<Vec<u8>>, id: &str, ours: &[&Channel]) -> R
     Ok(())
 }
 
-pub fn discover(base: &str, device_id: &str, tuners: usize) -> String {
+pub fn discover(base: &str, device_id: &str) -> String {
     json!({
         "FriendlyName": "tv-mediaproxy",
         "Manufacturer": "Silicondust",
@@ -202,7 +202,7 @@ pub fn discover(base: &str, device_id: &str, tuners: usize) -> String {
         "DeviceAuth": "tv-mediaproxy",
         "BaseURL": base,
         "LineupURL": format!("{base}/lineup.json"),
-        "TunerCount": tuners,
+        "TunerCount": crate::env("HDHR_TUNERS", 6),
     })
     .to_string()
 }
@@ -285,13 +285,13 @@ mod tests {
     fn lineup_takes_ts_entries_only() {
         let m3u = "#EXTM3U\n\
             #EXTINF:-1 tvg-id=\"a.be\" tvg-chno=\"7\" group-title=\"TV\",Channel A\n\
-            http://p/pw/ts/https://cdn/a.mpd\n\
-            #EXTINF:-1,Channel B\nhttp://p/pw/ts/https://cdn/b.mpd\n\
+            http://p/ts/https://cdn/a.mpd\n\
+            #EXTINF:-1,Channel B\nhttp://p/ts/https://cdn/b.mpd\n\
             #EXTINF:-1,Radio C\nhttps://cdn/c.mp3\n";
-        let channels = channels(m3u, "http://p/pw/ts/");
+        let channels = channels(m3u, "http://p/ts/");
         assert_eq!(
             lineup(&channels),
-            r#"[{"AudioCodec":"AAC","GuideName":"Channel A","GuideNumber":"7","HD":1,"URL":"http://p/pw/ts/https://cdn/a.mpd","VideoCodec":"H264"},{"AudioCodec":"AAC","GuideName":"Channel B","GuideNumber":"2","HD":1,"URL":"http://p/pw/ts/https://cdn/b.mpd","VideoCodec":"H264"}]"#
+            r#"[{"AudioCodec":"AAC","GuideName":"Channel A","GuideNumber":"7","HD":1,"URL":"http://p/ts/https://cdn/a.mpd","VideoCodec":"H264"},{"AudioCodec":"AAC","GuideName":"Channel B","GuideNumber":"2","HD":1,"URL":"http://p/ts/https://cdn/b.mpd","VideoCodec":"H264"}]"#
         );
     }
 
@@ -299,16 +299,15 @@ mod tests {
     fn guide_takes_names_numbers_and_logos_from_the_playlist() {
         let m3u = "#EXTM3U x-tvg-url=\"https://tv/guide.xml.gz\"\n\
             #EXTINF:-1 tvg-id=\"a.be\" tvg-chno=\"7\" tvg-logo=\"https://tv/a.png\",Channel A\n\
-            http://p/pw/ts/m=YQ\n";
+            http://p/ts/m=YQ\n";
         assert_eq!(guide_url(m3u).as_deref(), Some("https://tv/guide.xml.gz"));
         let xml = r#"<?xml version="1.0"?>
 <tv><channel id="a.be"><display-name>A old</display-name><icon src="old.png"/></channel>
 <channel id="b.be"><display-name>B</display-name></channel>
 <programme start="1" stop="2" channel="a.be"><title>Show &amp; tell</title></programme>
 <programme start="1" stop="2" channel="b.be"><title>Gone</title></programme></tv>"#;
-        let out =
-            String::from_utf8(guide(xml.as_bytes(), &channels(m3u, "http://p/pw/ts/")).unwrap())
-                .unwrap();
+        let out = String::from_utf8(guide(xml.as_bytes(), &channels(m3u, "http://p/ts/")).unwrap())
+            .unwrap();
         assert!(out.contains(r#"<channel id="a.be"><display-name>Channel A</display-name><display-name>7</display-name><icon src="https://tv/a.png"/></channel>"#), "{out}");
         assert!(out.contains("<title>Show &amp; tell</title>"), "{out}");
         assert!(

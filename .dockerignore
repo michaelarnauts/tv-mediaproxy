@@ -1,4 +1,6 @@
-# The image only needs the prebuilt binary and the GPAC patches.
 *
-!dist/tv-mediaproxy
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src
 !gpac/*.patch

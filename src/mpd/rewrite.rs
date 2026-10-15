@@ -30,7 +30,7 @@ use url::Url;
 pub struct RewriteParams<'a> {
     /// Upstream manifest URL after redirects; the root of URL resolution.
     pub manifest_url: &'a str,
-    /// Public base URL of this proxy including the password, no trailing slash.
+    /// Public base URL of this proxy, no trailing slash.
     pub prefix: &'a str,
     /// `kid:key[,kid:key]` for protected content. Without it, protected
     /// representations keep pointing at the origin.

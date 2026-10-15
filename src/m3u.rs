@@ -2,13 +2,12 @@
 //!
 //! Every ClearKey-protected MPD entry is routed through this proxy as
 //! `{prefix}/{kind}/{kid}:{key}/m={base64url(url)}`, with the keys from
-//! `#KODIPROP:inputstream.adaptive.license_key`, `kind` being `mpd`, `hls` or
-//! `ts`. For `ts` and `hls`, unprotected MPD entries go through it too, as
-//! `{prefix}/{kind}/m={base64url(url)}`. The URL is encoded because players
+//! `#KODIPROP:inputstream.adaptive.license_key`, `kind` being `mpd` or `ts`.
+//! For `ts`, unprotected MPD entries go through it too, as
+//! `{prefix}/{kind}/-/m={base64url(url)}`. The URL is encoded because players
 //! and servers normalise query strings (`%3D` to `=`), which breaks origins
 //! whose query carries a filter or token. Routed entries lose their `inputstream.adaptive.*`
-//! KODIPROPs: the proxied stream is no longer encrypted (nor, for `ts` and
-//! `hls`, DASH).
+//! KODIPROPs: the proxied stream is no longer encrypted (nor, for `ts`, DASH).
 //! Everything else is passed through unchanged.
 
 use std::collections::HashMap;
@@ -22,17 +21,14 @@ const ADAPTIVE_PROP: &str = "#KODIPROP:inputstream.adaptive.";
 pub enum Output {
     /// A decrypted DASH manifest.
     Mpd,
-    /// An HLS master playlist.
-    Hls,
     /// A continuous MPEG-TS stream.
     Ts,
 }
 
-/// `prefix` is the proxy's public base URL including the password.
+/// `prefix` is the proxy's public base URL.
 pub fn rewrite_m3u(content: &str, prefix: &str, output: Output) -> String {
     let kind = match output {
         Output::Mpd => "mpd",
-        Output::Hls => "hls",
         Output::Ts => "ts",
     };
     let mut out = String::with_capacity(content.len() + 4096);
@@ -58,7 +54,7 @@ pub fn rewrite_m3u(content: &str, prefix: &str, output: Output) -> String {
         let proxied = match key {
             Some(key) if clear_key && is_mpd => Some(format!("{prefix}/{kind}/{key}/{upstream}")),
             _ if output != Output::Mpd && unprotected && is_mpd => {
-                Some(format!("{prefix}/{kind}/{upstream}"))
+                Some(format!("{prefix}/{kind}/-/{upstream}"))
             }
             _ => None,
         };
@@ -102,12 +98,12 @@ mod tests {
              #KODIPROP:inputstream.adaptive.license_key={KEY}\nhttps://cdn/a/.mpd?x=1\n\n\
              #EXTINF:-1,B\nhttps://cdn/b.m3u8\n"
         );
-        let out = rewrite_m3u(&m3u, "http://p/pw", Output::Mpd);
+        let out = rewrite_m3u(&m3u, "http://p", Output::Mpd);
         assert!(!out.contains("KODIPROP"), "{out}");
         // m=aHR0cHM6Ly9jZG4vYS8ubXBkP3g9MQ is https://cdn/a/.mpd?x=1
         assert!(
             out.contains(&format!(
-                "#EXTINF:-1 tvg-id=\"a\",A\nhttp://p/pw/mpd/{KEY}/m=aHR0cHM6Ly9jZG4vYS8ubXBkP3g9MQ\n"
+                "#EXTINF:-1 tvg-id=\"a\",A\nhttp://p/mpd/{KEY}/m=aHR0cHM6Ly9jZG4vYS8ubXBkP3g9MQ\n"
             )),
             "{out}"
         );
@@ -117,7 +113,7 @@ mod tests {
     #[test]
     fn unprotected_mpd_is_untouched() {
         let m3u = "#EXTM3U\n#EXTINF:-1,C\nhttps://cdn/c.mpd\n";
-        assert_eq!(rewrite_m3u(m3u, "http://p/pw", Output::Mpd), m3u);
+        assert_eq!(rewrite_m3u(m3u, "http://p", Output::Mpd), m3u);
     }
 
     #[test]
@@ -127,12 +123,12 @@ mod tests {
              #KODIPROP:inputstream.adaptive.license_key={KEY}\nhttps://cdn/a.mpd\n\
              #EXTINF:-1,C\nhttps://cdn/c.mpd\n#EXTINF:-1,R\nhttps://cdn/r.mp3\n"
         );
-        let out = rewrite_m3u(&m3u, "http://p/pw", Output::Ts);
+        let out = rewrite_m3u(&m3u, "http://p", Output::Ts);
         assert_eq!(
             out,
             format!(
-                "#EXTM3U\n#EXTINF:-1,A\nhttp://p/pw/ts/{KEY}/{a}\n\
-                 #EXTINF:-1,C\nhttp://p/pw/ts/{c}\n#EXTINF:-1,R\nhttps://cdn/r.mp3\n",
+                "#EXTM3U\n#EXTINF:-1,A\nhttp://p/ts/{KEY}/{a}\n\
+                 #EXTINF:-1,C\nhttp://p/ts/-/{c}\n#EXTINF:-1,R\nhttps://cdn/r.mp3\n",
                 a = encode_upstream("https://cdn/a.mpd"),
                 c = encode_upstream("https://cdn/c.mpd"),
             )

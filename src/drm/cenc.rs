@@ -1,10 +1,7 @@
-//! CENC / CBCS / CBC1 / CENS MP4 segment decryptor.
-//!
-//! Ports `MP4Decrypter` from `drm/decrypter.py`.
+//! Decrypts `cenc` (AES-CTR) and `cbcs` (AES-CBC pattern) MP4 segments and
+//! strips their protection boxes. ClearKey keys are AES-128.
 
 use std::collections::HashMap;
-
-use tracing::warn;
 
 use super::mp4_atom::{Mp4Atom, Mp4Parser};
 
@@ -15,7 +12,6 @@ use super::mp4_atom::{Mp4Atom, Mp4Parser};
 /// Per-sample encryption info parsed from a `senc` box.
 #[derive(Debug, Clone)]
 pub struct SampleInfo {
-    pub is_encrypted: bool,
     /// Initialization vector (8 or 16 bytes).
     pub iv: Vec<u8>,
     /// Sub-sample list: (clear_bytes, encrypted_bytes).
@@ -38,29 +34,6 @@ struct TrackInfo {
     constant_iv: Option<Vec<u8>>,
 }
 
-// ---------------------------------------------------------------------------
-// Encryption scheme
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EncScheme {
-    Cenc, // AES-CTR, full sample
-    Cens, // AES-CTR, pattern
-    Cbc1, // AES-CBC, full sample
-    Cbcs, // AES-CBC, pattern
-}
-
-impl EncScheme {
-    fn from_bytes(b: &[u8]) -> Self {
-        match b {
-            b"cbcs" => Self::Cbcs,
-            b"cbc1" => Self::Cbc1,
-            b"cens" => Self::Cens,
-            _ => Self::Cenc,
-        }
-    }
-}
-
 /// Boxes in a `traf` that only describe encryption: sample auxiliary info and
 /// the `seig` sample group. They are removed along with the encryption.
 fn is_traf_encryption_box(atom: &Mp4Atom) -> bool {
@@ -78,14 +51,14 @@ fn is_traf_encryption_box(atom: &Mp4Atom) -> bool {
 pub struct Mp4Decrypter {
     key_map: HashMap<Vec<u8>, Vec<u8>>,
     // State accumulated during moof / stsd processing
-    encryption_scheme: EncScheme,
+    /// `cbcs` rather than `cenc`.
+    cbcs: bool,
     default_iv_size: usize,
     crypt_byte_block: u8,
     skip_byte_block: u8,
     constant_iv: Option<Vec<u8>>,
     default_sample_size: u32,
     trun_sample_sizes: Vec<u32>,
-    current_sample_info: Vec<SampleInfo>,
     total_encryption_overhead: usize,
     track_infos: Vec<TrackInfo>,
     track_encryption_settings: HashMap<u32, TrackSettings>,
@@ -105,14 +78,13 @@ impl Mp4Decrypter {
     pub fn new(key_map: HashMap<Vec<u8>, Vec<u8>>) -> Self {
         Self {
             key_map,
-            encryption_scheme: EncScheme::Cenc,
+            cbcs: false,
             default_iv_size: 8,
             crypt_byte_block: 1,
             skip_byte_block: 9,
             constant_iv: None,
             default_sample_size: 0,
             trun_sample_sizes: Vec::new(),
-            current_sample_info: Vec::new(),
             total_encryption_overhead: 0,
             track_infos: Vec::new(),
             track_encryption_settings: HashMap::new(),
@@ -126,8 +98,8 @@ impl Mp4Decrypter {
     // -----------------------------------------------------------------------
 
     /// Decrypt a media segment. The init segment supplies the track and
-    /// encryption parameters; its boxes are only emitted with `include_init`.
-    pub fn decrypt_segment(&mut self, init: &[u8], segment: &[u8], include_init: bool) -> Vec<u8> {
+    /// encryption parameters.
+    pub fn decrypt_segment(&mut self, init: &[u8], segment: &[u8]) -> Vec<u8> {
         let init_atoms = Mp4Parser::new(init.to_vec()).list_atoms();
         let segment_atoms = Mp4Parser::new(segment.to_vec()).list_atoms();
         let all = || init_atoms.iter().chain(segment_atoms.iter());
@@ -141,13 +113,8 @@ impl Mp4Decrypter {
             }
         }
 
-        let emitted: Vec<&Mp4Atom> = if include_init {
-            all().collect()
-        } else {
-            segment_atoms.iter().collect()
-        };
         let mut out = Vec::new();
-        for atom in emitted {
+        for atom in &segment_atoms {
             if let Some(p) = processed.get(&atom.atom_type) {
                 out.extend_from_slice(&p.pack());
             } else {
@@ -354,7 +321,7 @@ impl Mp4Decrypter {
     fn parse_schm(&mut self, schm: &Mp4Atom) {
         if schm.data.len() >= 8 {
             let scheme_type = &schm.data[4..8];
-            self.encryption_scheme = EncScheme::from_bytes(scheme_type);
+            self.cbcs = scheme_type == b"cbcs";
         }
     }
 
@@ -504,16 +471,13 @@ impl Mp4Decrypter {
         self.track_infos.push(TrackInfo {
             data_offset: trun_data_offset,
             sample_sizes: self.trun_sample_sizes.clone(),
-            sample_info: sample_info.clone(),
+            sample_info,
             key: track_key.cloned(),
             default_sample_size: track_default_sample_size,
             crypt_byte_block: crypt,
             skip_byte_block: skip,
             constant_iv: civ,
         });
-
-        // Keep single-track compatibility fields
-        self.current_sample_info = sample_info;
 
         // Some CMAF audio files omit tfhd and rely on trex defaults.
         // ffmpeg's mp4 parser requires tfhd to identify the track, so synthesize
@@ -571,8 +535,7 @@ impl Mp4Decrypter {
         pos += 4;
 
         let iv_size = self.default_iv_size;
-        let use_constant_iv =
-            self.encryption_scheme == EncScheme::Cbcs && self.constant_iv.is_some();
+        let use_constant_iv = self.cbcs && self.constant_iv.is_some();
 
         let mut samples = Vec::new();
         for _ in 0..sc {
@@ -603,11 +566,7 @@ impl Mp4Decrypter {
                 }
             }
 
-            samples.push(SampleInfo {
-                is_encrypted: true,
-                iv,
-                sub_samples,
-            });
+            samples.push(SampleInfo { iv, sub_samples });
         }
         samples
     }
@@ -700,66 +659,7 @@ impl Mp4Decrypter {
     // mdat decryption
     // -----------------------------------------------------------------------
 
-    fn decrypt_mdat(&mut self, mdat: &Mp4Atom) -> Mp4Atom {
-        if !self.track_infos.is_empty() {
-            return self.decrypt_mdat_multi_track(mdat);
-        }
-
-        // Single-track fallback
-        let current_key = match self.get_current_key() {
-            Some(k) => k.to_vec(),
-            None => return mdat.clone(),
-        };
-        if self.current_sample_info.is_empty() {
-            return mdat.clone();
-        }
-
-        let mdat_data = &mdat.data;
-        let sample_info = self.current_sample_info.clone();
-        let sample_sizes = self.trun_sample_sizes.clone();
-        let default_size = self.default_sample_size;
-        let scheme = self.encryption_scheme;
-        let crypt = self.crypt_byte_block;
-        let skip = self.skip_byte_block;
-        let civ = self.constant_iv.clone();
-
-        let mut decrypted = Vec::new();
-        let mut pos = 0usize;
-
-        for (i, info) in sample_info.iter().enumerate() {
-            if pos >= mdat_data.len() {
-                break;
-            }
-            let mut size = if i < sample_sizes.len() {
-                sample_sizes[i] as usize
-            } else {
-                0
-            };
-            if size == 0 {
-                size = if default_size > 0 {
-                    default_size as usize
-                } else {
-                    mdat_data.len() - pos
-                };
-            }
-            let sample = &mdat_data[pos..pos + size.min(mdat_data.len() - pos)];
-            let dec = decrypt_sample(
-                sample,
-                info,
-                &current_key,
-                scheme,
-                crypt,
-                skip,
-                civ.as_deref(),
-            );
-            decrypted.extend_from_slice(&dec);
-            pos += size;
-        }
-
-        Mp4Atom::new(*b"mdat", decrypted)
-    }
-
-    fn decrypt_mdat_multi_track(&self, mdat: &Mp4Atom) -> Mp4Atom {
+    fn decrypt_mdat(&self, mdat: &Mp4Atom) -> Mp4Atom {
         if self.track_infos.is_empty() {
             return mdat.clone();
         }
@@ -771,7 +671,6 @@ impl Mp4Decrypter {
         sorted_tracks.sort_by_key(|t| t.data_offset);
 
         let first_data_offset = sorted_tracks[0].data_offset;
-        let scheme = self.encryption_scheme;
 
         for track in &sorted_tracks {
             let Some(ref key) = track.key else { continue };
@@ -800,15 +699,18 @@ impl Mp4Decrypter {
                 }
 
                 let sample = &mdat_data[pos..pos + size];
-                let dec = decrypt_sample(
-                    sample,
-                    info,
-                    key,
-                    scheme,
-                    track.crypt_byte_block,
-                    track.skip_byte_block,
-                    track.constant_iv.as_deref(),
-                );
+                let dec = if self.cbcs {
+                    decrypt_sample_cbcs(
+                        sample,
+                        info,
+                        key,
+                        track.crypt_byte_block,
+                        track.skip_byte_block,
+                        track.constant_iv.as_deref(),
+                    )
+                } else {
+                    decrypt_sample_cenc(sample, info, key)
+                };
                 decrypted[pos..pos + dec.len().min(size)]
                     .copy_from_slice(&dec[..dec.len().min(size)]);
                 pos += size;
@@ -856,46 +758,13 @@ impl Mp4Decrypter {
         }
         None
     }
-
-    fn get_current_key(&self) -> Option<&Vec<u8>> {
-        if self.key_map.len() == 1 {
-            return self.key_map.values().next();
-        }
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Sample decryption (free functions)
 // ---------------------------------------------------------------------------
 
-fn decrypt_sample(
-    sample: &[u8],
-    info: &SampleInfo,
-    key: &[u8],
-    scheme: EncScheme,
-    crypt_byte_block: u8,
-    skip_byte_block: u8,
-    constant_iv: Option<&[u8]>,
-) -> Vec<u8> {
-    if !info.is_encrypted {
-        return sample.to_vec();
-    }
-    match scheme {
-        EncScheme::Cbcs => decrypt_sample_cbcs(
-            sample,
-            info,
-            key,
-            crypt_byte_block,
-            skip_byte_block,
-            constant_iv,
-        ),
-        EncScheme::Cbc1 => decrypt_sample_cbc1(sample, info, key),
-        _ => decrypt_sample_cenc(sample, info, key),
-    }
-}
-
-/// AES-CTR (cenc / cens). The keystream runs on across the protected ranges
+/// AES-CTR (cenc). The keystream runs on across the protected ranges
 /// of a sample byte for byte: a range that ends mid-block is continued by the
 /// next one, so the ranges are decrypted as one stream.
 fn decrypt_sample_cenc(sample: &[u8], info: &SampleInfo, key: &[u8]) -> Vec<u8> {
@@ -934,53 +803,10 @@ fn aes_ctr_decrypt(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     use aes::cipher::{KeyIvInit, StreamCipher};
 
     let mut buf = data.to_vec();
-    match key.len() {
-        16 => {
-            type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-            if let Ok(mut cipher) = Aes128Ctr::new_from_slices(key, iv) {
-                cipher.apply_keystream(&mut buf);
-            }
-        }
-        32 => {
-            type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
-            if let Ok(mut cipher) = Aes256Ctr::new_from_slices(key, iv) {
-                cipher.apply_keystream(&mut buf);
-            }
-        }
-        _ => {
-            warn!("Unsupported AES key length: {}", key.len());
-        }
+    if let Ok(mut cipher) = ctr::Ctr128BE::<aes::Aes128>::new_from_slices(key, iv) {
+        cipher.apply_keystream(&mut buf);
     }
     buf
-}
-
-/// AES-CBC (cbc1): per-sample, full blocks only.
-fn decrypt_sample_cbc1(sample: &[u8], info: &SampleInfo, key: &[u8]) -> Vec<u8> {
-    let mut iv = [0u8; 16];
-    let copy_len = info.iv.len().min(16);
-    iv[..copy_len].copy_from_slice(&info.iv[..copy_len]);
-
-    if info.sub_samples.is_empty() {
-        return aes_cbc_decrypt_full_blocks(key, &iv, sample);
-    }
-
-    let mut result = Vec::with_capacity(sample.len());
-    let mut pos = 0usize;
-
-    for &(clear, enc) in &info.sub_samples {
-        let end = (pos + clear as usize).min(sample.len());
-        result.extend_from_slice(&sample[pos..end]);
-        pos += clear as usize;
-
-        let enc_end = (pos + enc as usize).min(sample.len());
-        let enc_data = &sample[pos..enc_end];
-        result.extend_from_slice(&aes_cbc_decrypt_full_blocks(key, &iv, enc_data));
-        pos += enc as usize;
-    }
-    if pos < sample.len() {
-        result.extend_from_slice(&sample[pos..]);
-    }
-    result
 }
 
 /// AES-CBC with pattern encryption (cbcs).
@@ -1108,54 +934,38 @@ fn aes_cbc_decrypt_full_blocks(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Vec<u8
     }
 
     let mut result = data.to_vec();
-    match key.len() {
-        16 => {
-            type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-            if let Ok(cipher) = Aes128CbcDec::new_from_slices(key, iv) {
-                if let Ok(out) = cipher.decrypt_padded_mut::<NoPadding>(&mut result[..complete]) {
-                    // out is a slice into result, already decrypted in-place
-                    let _ = out;
-                }
-            }
-        }
-        32 => {
-            type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
-            if let Ok(cipher) = Aes256CbcDec::new_from_slices(key, iv) {
-                if let Ok(out) = cipher.decrypt_padded_mut::<NoPadding>(&mut result[..complete]) {
-                    let _ = out;
-                }
-            }
-        }
-        _ => {
-            warn!("Unsupported AES key length: {}", key.len());
-        }
+    if let Ok(cipher) = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv) {
+        // Decrypts in place.
+        let _ = cipher.decrypt_padded_mut::<NoPadding>(&mut result[..complete]);
     }
     result
 }
 
 // ---------------------------------------------------------------------------
-// Public entry points (mirrors Python module-level functions)
+// Public entry points
 // ---------------------------------------------------------------------------
 
 /// Decrypt a media segment. `keys` is `kid:key[,kid:key]` in hex.
-pub fn decrypt_segment(
-    init_segment: &[u8],
-    segment_content: &[u8],
-    keys: &str,
-    include_init: bool,
-) -> Result<Vec<u8>, String> {
-    let mut decrypter = Mp4Decrypter::new(key_map(keys)?);
-    Ok(decrypter.decrypt_segment(init_segment, segment_content, include_init))
+pub fn decrypt_segment(init: &[u8], segment: &[u8], keys: &str) -> Result<Vec<u8>, String> {
+    Ok(Mp4Decrypter::new(key_map(keys)?).decrypt_segment(init, segment))
 }
 
-/// Strip encryption boxes from an init segment. `keys` is `kid:key[,kid:key]` in hex.
-pub fn process_drm_init_segment(init_segment: &[u8], keys: &str) -> Result<Vec<u8>, String> {
-    let mut decrypter = Mp4Decrypter::new(key_map(keys)?);
-    Ok(decrypter.process_init_only(init_segment))
+/// Strip the protection boxes from an init segment.
+pub fn decrypt_init(init: &[u8], keys: &str) -> Result<Vec<u8>, String> {
+    Ok(Mp4Decrypter::new(key_map(keys)?).process_init_only(init))
 }
 
+/// `kid:key[,kid:key]` hex pairs (dashes allowed) as a `KID → key` map.
 fn key_map(keys: &str) -> Result<HashMap<Vec<u8>, Vec<u8>>, String> {
-    let map = crate::drm::clearkey::parse_keys(keys);
+    let map: HashMap<_, _> = keys
+        .split(',')
+        .filter_map(|pair| {
+            let (kid, key) = pair.trim().split_once(':')?;
+            let kid = hex::decode(kid.replace('-', "")).ok()?;
+            let key = hex::decode(key.replace('-', "")).ok()?;
+            Some((kid, key))
+        })
+        .collect();
     if map.is_empty() {
         return Err("No valid kid:key pairs provided".to_string());
     }
@@ -1191,7 +1001,6 @@ mod tests {
         }
 
         let info = SampleInfo {
-            is_encrypted: true,
             iv: iv8.to_vec(),
             sub_samples,
         };

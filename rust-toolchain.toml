@@ -1,6 +1,5 @@
-# The Rust version for local builds and CI alike. Bump deliberately.
+# The Rust version for the image and CI alike. Bump deliberately.
 [toolchain]
 channel = "1.99.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
-targets = ["x86_64-unknown-linux-musl"]

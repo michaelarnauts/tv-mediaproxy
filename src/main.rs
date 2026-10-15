@@ -57,7 +57,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(init_cache.clone()))
             .default_service(web::get().to(handler::handle))
     })
-    .bind(("0.0.0.0", 8888))?
+    .bind(("0.0.0.0", env("PORT", 8888)))?
     .run()
     .await
 }

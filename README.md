@@ -4,6 +4,34 @@ Plays ClearKey-protected MPEG-DASH in players that cannot decrypt it. Put the pr
 an M3U playlist whose DASH streams carry their ClearKey keys
 (`#KODIPROP:inputstream.adaptive.license_key=<kid>:<key>`).
 
+## Running
+
+### Docker
+
+```bash
+docker run -p 8888:8888 ghcr.io/michaelarnauts/tv-mediaproxy
+```
+
+The image brings the patched GPAC (see Workarounds).
+
+### From source
+
+```bash
+cargo build --release
+./target/release/tv-mediaproxy
+```
+
+`ts` (and so `m3u-ts` and `hdhr`) needs the patched `gpac` on the `PATH`; the rest works without.
+
+### Environment
+
+| Variable | Default | |
+|---|---|---|
+| `PORT` | `8888` | Port the proxy listens on. |
+| `TS_START_BUFFER` | `12` | Seconds behind the newest segment that `ts` starts. Those segments are already published, so a client gets them at once: Jellyfin and Plex (ffmpeg) want a few seconds of media before they start, and would otherwise wait for them to appear one by one. |
+| `HDHR_TUNERS` | `6` | Tuners `hdhr` announces: how many channels a client may play at once. |
+| `RUST_LOG` | `info` | Log filter. |
+
 ## Usage
 
 Give your player one of these:
@@ -30,34 +58,6 @@ The playlist comes back with its streams pointing at the proxy:
 `<keys>` is `<kid>:<key>[,…]`, or `-` for a clear stream. These URLs carry the upstream URL as
 `m=<base64url>`, so no client can rewrite its query string (Plex does), and use the address the
 playlist was fetched from.
-
-## Running
-
-### Docker
-
-```bash
-docker run -p 8888:8888 ghcr.io/michaelarnauts/tv-mediaproxy
-```
-
-The image brings the patched GPAC (see Workarounds).
-
-### Without Docker
-
-```bash
-cargo run --release
-```
-
-`ts` (and so `m3u-ts` and `hdhr`) needs the patched `gpac` on the `PATH`; the rest works without.
-
-### Environment
-
-| Variable | Default | |
-|---|---|---|
-| `TS_START_BUFFER` | `12` | Seconds behind the newest segment that `ts` starts. Those segments are already published, so a client gets them at once: Jellyfin and Plex (ffmpeg) want a few seconds of media before they start, and would otherwise wait for them to appear one by one. |
-| `HDHR_TUNERS` | `6` | Tuners `hdhr` announces: how many channels a client may play at once. |
-| `RUST_LOG` | `info` | Log filter. |
-
-The proxy listens on port 8888.
 
 ## Workarounds
 

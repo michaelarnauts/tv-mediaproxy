@@ -40,7 +40,7 @@ Give your player one of these:
 |---|---|
 | `http://<host>:8888/m3u/<playlist url>` | DASH players. The streams stay DASH, decrypted, and you can still seek back as far as the origin allows. |
 | `http://<host>:8888/m3u-ts/<playlist url>` | Players that are better at MPEG-TS than at live DASH, like VLC. Every stream becomes one continuous MPEG-TS stream. |
-| `http://<host>:8888/hdhr/<playlist url>` | Plex and Jellyfin Live TV: an HDHomeRun tuner with the playlist's channels as MPEG-TS. Use `…/hdhr/<playlist url>/guide.xml` as its guide: the playlist's guide, limited to those channels. |
+| `http://<host>:8888/hdhr/m3u/<playlist url>` | Plex and Jellyfin Live TV: an HDHomeRun tuner with the playlist's channels as MPEG-TS. Use `…/hdhr/guide/<playlist url>` as its guide: the playlist's guide, limited to those channels. |
 
 For example `http://192.168.1.10:8888/m3u-ts/https://tv.example/iptv.m3u`. The playlist URL is
 taken as written, query included.

@@ -1,11 +1,12 @@
 //! HDHomeRun emulation, for Plex Live TV, which only takes HDHomeRun tuners.
 //!
-//! The tuner's base URL is `{prefix}/hdhr/{playlist URL}`; a client appends
+//! The tuner's base URL is `{prefix}/hdhr/m3u/{playlist URL}`; a client appends
 //! `/discover.json`, `/lineup.json`, `/lineup_status.json` or `/device.xml`.
 //! The lineup lists the playlist's entries that go through `ts`, so every
 //! channel is one continuous MPEG-TS stream, as from a real tuner.
 //!
-//! `/guide.xml` is the playlist's XMLTV guide made to match the lineup:
+//! `{prefix}/hdhr/guide/{playlist URL}` is the playlist's XMLTV guide made to
+//! match the lineup:
 //! HDHomeRun lineups carry no guide ids, so clients match a guide by channel
 //! number. Each guide channel the lineup has (by `tvg-id`) gets the
 //! playlist's name, number and logo; the rest is left out.
@@ -24,7 +25,6 @@ pub enum File {
     Lineup,
     LineupStatus,
     DeviceXml,
-    Guide,
 }
 
 /// Split a tuner request into the playlist URL and the file asked for. The
@@ -35,7 +35,6 @@ pub fn split(url: &str) -> (&str, File) {
         ("/lineup.json", File::Lineup),
         ("/lineup_status.json", File::LineupStatus),
         ("/device.xml", File::DeviceXml),
-        ("/guide.xml", File::Guide),
     ] {
         if let Some(playlist) = url.strip_suffix(name) {
             return (playlist, file);

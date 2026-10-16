@@ -15,8 +15,9 @@
 //!   media template is a media segment and gets decrypted with its init
 //!   segment; anything else is the init segment and loses its protection,
 //! - `ts`: a manifest played into one MPEG-TS stream by GPAC (see `ts`),
-//! - `hdhr`: an HDHomeRun tuner whose channels are the playlist's `ts`
+//! - `hdhr/m3u`: an HDHomeRun tuner whose channels are the playlist's `ts`
 //!   entries (see `hdhr`); the client appends `/discover.json` and the like.
+//!   `hdhr/guide/{playlist URL}` is its guide.
 //!
 //! `t=` carries the base64url absolute initialization and media templates; the
 //! MPD rewrite puts it in the `BaseURL` of protected content, so the segment
@@ -41,6 +42,7 @@ pub struct InitCache(pub moka::future::Cache<String, Bytes>);
 #[derive(Debug, PartialEq)]
 enum Kind {
     Hdhr,
+    HdhrGuide,
     M3u,
     M3uTs,
     Mpd,
@@ -79,31 +81,28 @@ pub async fn handle(
         }
         Kind::Hdhr => {
             let (playlist, file) = hdhr::split(&target.url);
-            let base = format!("{prefix}/hdhr/{playlist}");
+            let base = format!("{prefix}/hdhr/m3u/{playlist}");
             let id = hdhr::device_id(playlist);
             match file {
                 hdhr::File::Discover => (hdhr::discover(&base, &id).into(), "application/json"),
                 hdhr::File::LineupStatus => (hdhr::lineup_status().into(), "application/json"),
                 hdhr::File::DeviceXml => (hdhr::device_xml(&base, &id).into(), "application/xml"),
-                hdhr::File::Lineup | hdhr::File::Guide => {
-                    let m3u = fetch(&client, playlist).await?.body;
-                    let m3u = String::from_utf8_lossy(&m3u);
-                    let routed = rewrite_m3u(&m3u, &prefix, Output::Ts);
-                    let channels = hdhr::channels(&routed, &format!("{prefix}/ts/"));
-                    if file == hdhr::File::Lineup {
-                        (hdhr::lineup(&channels).into(), "application/json")
-                    } else {
-                        let url = hdhr::guide_url(&m3u).ok_or_else(|| {
-                            AppError::NotFound("The playlist names no guide (x-tvg-url)".into())
-                        })?;
-                        let xml = gunzip(fetch(&client, &url).await?.body)
-                            .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
-                        let guide = hdhr::guide(&xml, &channels)
-                            .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
-                        (guide.into(), "application/xml")
-                    }
+                hdhr::File::Lineup => {
+                    let (_, channels) = lineup(&client, playlist, &prefix).await?;
+                    (hdhr::lineup(&channels).into(), "application/json")
                 }
             }
+        }
+        Kind::HdhrGuide => {
+            let (m3u, channels) = lineup(&client, &target.url, &prefix).await?;
+            let url = hdhr::guide_url(&m3u).ok_or_else(|| {
+                AppError::NotFound("The playlist names no guide (x-tvg-url)".into())
+            })?;
+            let xml = gunzip(fetch(&client, &url).await?.body)
+                .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
+            let guide = hdhr::guide(&xml, &channels)
+                .map_err(|e| AppError::Upstream(format!("Guide {url}: {e}")))?;
+            (guide.into(), "application/xml")
         }
         Kind::M3u | Kind::M3uTs => {
             let output = if target.kind == Kind::M3u {
@@ -179,6 +178,18 @@ pub async fn fetch(client: &reqwest::Client, url: &str) -> AppResult<Fetched> {
     })
 }
 
+/// The playlist at `url` and its channels as an HDHomeRun lineup.
+async fn lineup(
+    client: &reqwest::Client,
+    url: &str,
+    prefix: &str,
+) -> AppResult<(String, Vec<hdhr::Channel>)> {
+    let m3u = String::from_utf8_lossy(&fetch(client, url).await?.body).into_owned();
+    let routed = rewrite_m3u(&m3u, prefix, Output::Ts);
+    let channels = hdhr::channels(&routed, &format!("{prefix}/ts/"));
+    Ok((m3u, channels))
+}
+
 /// An init segment, from the cache when its representation was seen before.
 async fn fetch_init(client: &reqwest::Client, cache: &InitCache, url: String) -> AppResult<Bytes> {
     cache
@@ -205,13 +216,17 @@ fn gunzip(data: Bytes) -> std::io::Result<Bytes> {
 fn parse_target(uri: &Uri) -> AppResult<Target> {
     let bad = |what: &str| {
         AppError::BadRequest(format!(
-            "Bad {what}: expected /{{m3u|m3u-ts|hdhr}}/<url>, /{{mpd|ts}}/<keys|->/<url> \
-             or /seg/<keys>/t=<templates>/<url>"
+            "Bad {what}: expected /{{m3u|m3u-ts|hdhr/m3u|hdhr/guide}}/<url>, \
+             /{{mpd|ts}}/<keys|->/<url> or /seg/<keys>/t=<templates>/<url>"
         ))
     };
     let mut rest = uri.path().trim_start_matches('/');
     let kind = match next(&mut rest) {
-        "hdhr" => Kind::Hdhr,
+        "hdhr" => match next(&mut rest) {
+            "m3u" => Kind::Hdhr,
+            "guide" => Kind::HdhrGuide,
+            _ => return Err(bad("kind")),
+        },
         "m3u" => Kind::M3u,
         "m3u-ts" => Kind::M3uTs,
         "mpd" => Kind::Mpd,

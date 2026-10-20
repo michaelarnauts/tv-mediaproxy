@@ -1,7 +1,7 @@
-# GPAC at a pinned commit with the fixes in gpac/*.patch, linked into one
+# GPAC at a pinned commit, linked into one
 # binary (no ffmpeg, no display or audio output).
 FROM debian:trixie-slim AS gpac
-ARG GPAC_COMMIT=6a8ebb71b7e19d47023e4f91ee960f3636644403
+ARG GPAC_COMMIT=7cda8f465456c730a8cea78305b9b95ebb9b63fa
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config git ca-certificates \
       zlib1g-dev libssl-dev libnghttp2-dev \
@@ -10,9 +10,7 @@ WORKDIR /src/gpac
 RUN git init -q \
  && git fetch -q --depth 1 https://github.com/gpac/gpac.git "$GPAC_COMMIT" \
  && git checkout -q FETCH_HEAD
-COPY gpac/*.patch /src/
-RUN git apply /src/*.patch \
- && ./configure --static-build --disable-x11 \
+RUN ./configure --static-build --disable-x11 \
  && make -j"$(nproc)" \
  && install -m 755 bin/gcc/gpac /usr/local/bin/gpac
 

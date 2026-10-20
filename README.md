@@ -12,7 +12,7 @@ an M3U playlist whose DASH streams carry their ClearKey keys
 docker run -p 8888:8888 ghcr.io/michaelarnauts/tv-mediaproxy
 ```
 
-The image brings the patched GPAC (see Workarounds).
+The image brings GPAC.
 
 ### From source
 
@@ -21,7 +21,9 @@ cargo build --release
 ./target/release/tv-mediaproxy
 ```
 
-`ts` (and so `m3u-ts` and `hdhr`) needs the patched `gpac` on the `PATH`; the rest works without.
+`ts` (and so `m3u-ts` and `hdhr`) needs `gpac` on the `PATH`, from master at
+[7cda8f4](https://github.com/gpac/gpac/commit/7cda8f465456c730a8cea78305b9b95ebb9b63fa) or later;
+the rest works without.
 
 ### Environment
 
@@ -69,18 +71,6 @@ playlist was fetched from.
   the `BaseURL` on that element.
 - **CDNs** may refuse clients that are not a browser, so the proxy and GPAC send a Chrome
   User-Agent.
-- **GPAC** is built with these patches; drop one once GPAC merges its PR:
-
-| Patch | PR | Fixes |
-|---|---|---|
-| `0001` | [#3992](https://github.com/gpac/gpac/pull/3992) | `cdcrypt` ignored `kids`/`keys` for MP4 input |
-| `0002` | [#3991](https://github.com/gpac/gpac/pull/3991) | `<MPD` followed by a newline was not probed as DASH |
-| `0003` | [#3993](https://github.com/gpac/gpac/pull/3993) | gzip-encoded manifest updates failed to parse |
-| `0004` | [#3995](https://github.com/gpac/gpac/pull/3995) | the presentation delay also delayed segment availability |
-| `0005` | [#3990](https://github.com/gpac/gpac/pull/3990) | fractional seconds in durations were read as milliseconds |
-| `0006` | [#3996](https://github.com/gpac/gpac/pull/3996) | an HTTP/2 manifest update could be lost, ending the stream |
-| `0007` | [#3994](https://github.com/gpac/gpac/pull/3994) | the segment position moved once per quality on each update |
-| `0008` | [#3997](https://github.com/gpac/gpac/pull/3997) | `-user-agent`/`-ua` never reached HTTP requests |
 
 ## Credits
 

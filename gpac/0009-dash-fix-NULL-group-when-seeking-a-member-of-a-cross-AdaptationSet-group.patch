@@ -1,0 +1,32 @@
+From d1de0d454e718a4983451539391175116c69de84 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C3=ABl=20Arnauts?= <michael.arnauts@gmail.com>
+Date: Wed, 4 Nov 2026 17:23:45 +0000
+Subject: [PATCH] dash: fix NULL group when seeking a member of a
+ cross-AdaptationSet group
+
+gf_dash_seek_group counted the linked groups on the base group but read
+them from the group being seeked. For a member group that list is NULL
+or shorter, so gather_ssr_rep got a NULL group and crashed when playback
+started outside the first Period.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/media_tools/dash_client.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/media_tools/dash_client.c b/src/media_tools/dash_client.c
+index a795c897d..5ca486e92 100644
+--- a/src/media_tools/dash_client.c
++++ b/src/media_tools/dash_client.c
+@@ -8882,7 +8882,7 @@ static void gf_dash_seek_group(GF_DashClient *dash, GF_DASH_Group *group, Double
+ 		gather_ssr_rep(gr, select);
+ 		u32 j, count = gf_list_count(gr->xas_groups);
+ 		for (j=0; j<count; j++) {
+-			GF_DASH_Group *agr = gf_list_get(group->xas_groups, j);
++			GF_DASH_Group *agr = gf_list_get(gr->xas_groups, j);
+ 			gather_ssr_rep(agr, select);
+ 		}
+ 		if (gf_list_count(select)) {
+-- 
+2.43.0
+

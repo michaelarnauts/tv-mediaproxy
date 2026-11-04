@@ -36,7 +36,8 @@ cargo build --release
 ```
 
 `gpac` must be on the `PATH`, built from master at
-[7cda8f4](https://github.com/gpac/gpac/commit/7cda8f465456c730a8cea78305b9b95ebb9b63fa) or later.
+[3f05654](https://github.com/gpac/gpac/commit/3f056542b377cc73677d19490bfe1b46c52c9be7) or later,
+with the patches in `gpac/` (see Workarounds).
 
 ## Configuration
 
@@ -98,6 +99,11 @@ playlist was fetched from.
   the `BaseURL` on that element.
 - **CDNs** may refuse clients that are not a browser, so the proxy and GPAC send a Chrome
   User-Agent.
+- **GPAC** is built with these patches; drop one once GPAC merges its PR:
+
+| Patch | PR | Fixes |
+|---|---|---|
+| `0009` | [#4041](https://github.com/gpac/gpac/pull/4041) | a crash on AdaptationSets linked by `adaptation-set-switching` when playback starts outside the first Period |
 
 ---
 
